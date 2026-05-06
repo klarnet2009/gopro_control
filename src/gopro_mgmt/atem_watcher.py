@@ -284,7 +284,7 @@ class AtemWatcher:
     async def _broadcast_status(self) -> None:
         await self._broadcaster.broadcast({
             "type": "atem_status",
-            "payload": self.status,
+            "payload": {"enabled": True, **self.status},
         })
 
     async def _broadcast_event(self, event: dict[str, Any]) -> None:
