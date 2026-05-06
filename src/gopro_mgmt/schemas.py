@@ -81,6 +81,8 @@ class CameraStatus(BaseModel):
     cohn_provisioned: bool = False
     # Last-known camera IP from cohn_db.json (informational only).
     cohn_ip: str | None = None
+    # BLE signal strength in dBm, updated each poll cycle. None for COHN (no BLE) or disconnected.
+    rssi: int | None = None
 
 
 class CameraSettingsPayload(BaseModel):

@@ -246,7 +246,7 @@ function renderStatus(s) {
 
   // Tally
   const tally = card.querySelector(".tally");
-  const tallyState = resolveTally(s);
+  const tallyState = entry.stopping ? { state: "stopping", label: "STOPPING" } : resolveTally(s);
   tally.dataset.state = tallyState.state;
   tally.querySelector(".tally-label").textContent = tallyState.label;
 
@@ -295,6 +295,37 @@ function renderStatus(s) {
   } else {
     sdEl.textContent = "—";
     diskBar.style.width = "0%";
+  }
+
+  // Signal strength (BLE RSSI)
+  const sigRow  = card.querySelector(".cam-sig-row");
+  const sigBar  = card.querySelector(".signal-bar");
+  const sigEl   = card.querySelector(".cam-sig");
+  // Dim the signal row when camera is offline (showing stale value)
+  sigRow.dataset.stale = (s.rssi != null && s.connection !== "connected") ? "true" : "false";
+
+  if (s.rssi != null && s.mode !== "cohn") {
+    // -30 dBm excellent … -90 dBm poor (same scale as scan dialog)
+    const strength = Math.max(0, Math.min(4, Math.round(((s.rssi + 90) / 60) * 4)));
+    sigBar.querySelectorAll("i").forEach((seg, i) => seg.classList.toggle("on", i < strength));
+    const lvl = strength >= 3 ? "ok" : strength === 2 ? "warn" : "crit";
+    sigBar.dataset.level = lvl;
+    sigEl.textContent = `${s.rssi} dBm`;
+    sigEl.dataset.warn = lvl === "crit" ? "crit" : lvl === "warn" ? "low" : "";
+    sigEl.title = strength === 0 ? "Very weak signal — check camera range"
+      : strength === 1 ? "Weak signal"
+      : strength === 2 ? "Fair signal"
+      : strength === 3 ? "Good signal"
+      : "Excellent signal";
+    sigRow.hidden = false;
+  } else {
+    sigBar.querySelectorAll("i").forEach(i => i.classList.remove("on"));
+    sigBar.dataset.level = "none";
+    sigEl.textContent = "—";
+    sigEl.dataset.warn = "";
+    sigEl.title = "";
+    // Always show for BLE cameras; hide only for COHN (no BLE connection)
+    sigRow.hidden = s.mode === "cohn";
   }
 
   // Resolution + FPS readout
@@ -561,12 +592,31 @@ async function onLinkPress(entry) {
 async function onRollPress(entry) {
   const id = entry.card.dataset.id;
   const s  = lastStatus.get(id);
-  const path = s?.encoding ? `/api/cameras/${id}/record/stop` : `/api/cameras/${id}/record/start`;
+  const stopping = s?.encoding === true;
+  const path = stopping ? `/api/cameras/${id}/record/stop` : `/api/cameras/${id}/record/start`;
+
+  if (stopping) {
+    entry.stopping = true;
+    renderStatus({ ...s, encoding: false });
+  }
+
+  let stopOk = false;
   try {
     const r = await api("POST", path);
     if (r?.error) toast("error", r.error.message);
+    else stopOk = true;
   } catch (err) {
     toast("error", err.message);
+  } finally {
+    if (stopping) {
+      entry.stopping = false;
+      const latest = lastStatus.get(id);
+      if (latest) {
+        // If stop succeeded, force encoding=false — lastStatus may still carry a
+        // stale encoding=true from a poller update that arrived mid-flight.
+        renderStatus(stopOk ? { ...latest, encoding: false } : latest);
+      }
+    }
   }
 }
 
