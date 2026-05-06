@@ -1316,6 +1316,79 @@ button:not([disabled]):active {
 
 .hidden { display: none !important; }
 
+/* ========================== MODE TAGS (dialog picker) ============== */
+
+.mode-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.mode-tag-rec {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border: 1px solid var(--ok-line);
+}
+.mode-tag-adv {
+  background: var(--surface-3);
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+}
+
+/* BLE badge on camera cards — neutral (standard mode, no special emphasis) */
+.badge-mode[data-mode="ble"] {
+  border-color: var(--border-hi);
+  color: var(--text-mute);
+  background: var(--surface-3);
+}
+
+/* COHN info block in Add/Edit dialog */
+.cohn-info {
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  background: var(--primary-soft);
+  border: 1px solid var(--primary-line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cohn-info-title {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--primary-hi);
+  text-transform: uppercase;
+}
+.cohn-info-body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.4;
+}
+
+/* Provision dialog info text */
+.dialog-info {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--r-sm);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  line-height: 1.5;
+  background: var(--surface-3);
+  color: var(--text-dim);
+  border: 1px solid var(--border-hi);
+}
+.dialog-info strong { color: var(--text); }
+
 @media (max-width: 720px) {
   .top-rail { grid-template-columns: 1fr auto; padding: 0 16px; }
   .rail-center { display: none; }

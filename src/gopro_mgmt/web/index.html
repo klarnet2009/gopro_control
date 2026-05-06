@@ -235,13 +235,24 @@
         <legend class="field-label">Transport</legend>
         <label class="mode-opt">
           <input type="radio" name="mode" value="ble" checked />
-          <span><b>BLE</b><small>fast, sufficient for start/stop</small></span>
+          <span>
+            <b>BLE <span class="mode-tag mode-tag-rec">Default</span></b>
+            <small>Fast · start/stop · battery status</small>
+          </span>
         </label>
         <label class="mode-opt">
           <input type="radio" name="mode" value="cohn" />
-          <span><b>COHN</b><small>HTTP over home Wi-Fi · clock sync · live preview</small></span>
+          <span>
+            <b>COHN <span class="mode-tag mode-tag-adv">Advanced</span></b>
+            <small>Wi-Fi · clock sync · live preview · setup required</small>
+          </span>
         </label>
       </fieldset>
+
+      <div id="cohn-info" class="cohn-info hidden">
+        <p class="cohn-info-title">&#9881; One-time Wi-Fi setup required</p>
+        <p class="cohn-info-body">After adding the camera, a setup wizard will connect it to your home Wi-Fi via Bluetooth. Have your Wi-Fi password ready. The camera will reboot once (~30 s).</p>
+      </div>
 
       <p id="dialog-warn" class="dialog-warn hidden"></p>
       <p id="dialog-error" class="dialog-error hidden"></p>
@@ -256,25 +267,25 @@
   <dialog id="provision-dialog" class="dialog">
     <form method="dialog" id="provision-form">
       <header class="dialog-head">
-        <p class="dialog-eyebrow">FIRST-TIME COHN SETUP</p>
-        <h3>Provision <span id="provision-name">Camera</span></h3>
+        <p class="dialog-eyebrow">COHN SETUP — STEP 1 OF 2</p>
+        <h3>Connect <span id="provision-name">Camera</span> to Wi-Fi</h3>
       </header>
-      <p class="dialog-warn">
-        The camera will join the Wi-Fi network you specify and reboot. This takes 20–40 seconds.
+      <p class="dialog-info">
+        The camera will join your home Wi-Fi via Bluetooth and generate a security certificate, then reboot. This takes <strong>20–40 seconds</strong>. After setup it can be controlled over the network — no Bluetooth needed.
       </p>
       <label class="field">
-        <span class="field-label">Wi-Fi SSID</span>
-        <input name="ssid" required maxlength="32" autocomplete="off" />
+        <span class="field-label">Wi-Fi Network (SSID)</span>
+        <input name="ssid" required maxlength="32" autocomplete="off" placeholder="My Home Network" />
       </label>
       <label class="field">
         <span class="field-label">Wi-Fi Password</span>
         <input name="password" type="password" required minlength="8" maxlength="63" autocomplete="off" />
-        <small class="field-hint">8–63 characters, WPA2/3 PSK.</small>
+        <small class="field-hint">WPA2 / WPA3 · 8–63 characters</small>
       </label>
       <p id="provision-error" class="dialog-error hidden"></p>
       <footer class="dialog-actions">
         <button type="button" id="provision-cancel" class="btn-ghost">Cancel</button>
-        <button type="submit" class="btn-brass" id="provision-submit">Provision</button>
+        <button type="submit" class="btn-brass" id="provision-submit">Connect to Wi-Fi</button>
       </footer>
     </form>
   </dialog>

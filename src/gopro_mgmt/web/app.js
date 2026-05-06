@@ -28,6 +28,7 @@ const countArmed    = document.getElementById("count-armed");
 const countTotal    = document.getElementById("count-total");
 const countRolling  = document.getElementById("count-rolling");
 const busHint       = document.getElementById("bus-hint");
+const cohnInfo      = document.getElementById("cohn-info");
 
 
 // ─── State ───────────────────────────────────────────────────────────────
@@ -142,6 +143,18 @@ function stopLinkingEscalation(id) {
   clearTimeout(t.t1); clearTimeout(t.t2);
   if (t.hintEl) t.hintEl.remove(); // remove from DOM entirely so it doesn't linger in a11y tree
   linkTimers.delete(id);
+}
+
+// ─── COHN info visibility (Add/Edit dialog) ──────────────────────────────
+function updateCohnInfoVisibility(mode, editingId = null) {
+  if (!cohnInfo) return;
+  if (mode !== "cohn") { cohnInfo.classList.add("hidden"); return; }
+  // If editing an already-provisioned camera, no need for wizard info
+  if (editingId) {
+    const s = lastStatus.get(editingId);
+    if (s?.cohn_provisioned) { cohnInfo.classList.add("hidden"); return; }
+  }
+  cohnInfo.classList.remove("hidden");
 }
 
 // ─── Tally / badge resolver ─────────────────────────────────────────────
@@ -814,6 +827,7 @@ function resetDialog() {
   scanSection.classList.add("hidden");
   scanList.innerHTML = "";
   scanEmpty.classList.add("hidden");
+  if (cohnInfo) cohnInfo.classList.add("hidden");
   dialogForm.elements.id.readOnly = false;
 }
 
@@ -850,6 +864,7 @@ function openEditDialog(id) {
     dialogWarn.textContent = "This camera is not yet provisioned. Save first, then click the gear icon on the card to provision.";
     dialogWarn.classList.remove("hidden");
   }
+  updateCohnInfoVisibility(mode, id);
   dialog.showModal();
   setTimeout(() => dialogForm.elements.name.focus(), 30);
 }
@@ -883,16 +898,39 @@ dialogForm.addEventListener("submit", async (ev) => {
       const r = await api("POST", "/api/cameras", body);
       if (r.data) renderStatus(r.data);
       toast("success", `Channel "${body.name}" added`);
+      dialog.close();
+      // Auto-trigger COHN provision wizard if needed
+      if (body.mode === "cohn" && r.data && !r.data.cohn_provisioned) {
+        setTimeout(() => {
+          const entry = cardsById.get(body.id);
+          if (entry) onProvisionCohn(entry);
+        }, 250);
+      }
     } else {
       const id = body.id;
       delete body.id;
       const r = await api("PATCH", `/api/cameras/${id}`, body);
       if (r.data) renderStatus(r.data);
+      dialog.close();
+      // Auto-trigger COHN provision wizard if switched to COHN and not provisioned
+      if (body.mode === "cohn" && r.data && !r.data.cohn_provisioned) {
+        setTimeout(() => {
+          const entry = cardsById.get(id);
+          if (entry) onProvisionCohn(entry);
+        }, 250);
+      }
     }
-    dialog.close();
   } catch (err) {
     dialogError.textContent = String(err.message || err);
     dialogError.classList.remove("hidden");
+  }
+});
+
+// Show COHN wizard info when transport radio changes
+dialogForm.addEventListener("change", (ev) => {
+  if (ev.target.name === "mode") {
+    const editId = dialogMode === "edit" ? dialogForm.elements.id?.value : null;
+    updateCohnInfoVisibility(ev.target.value, editId);
   }
 });
 
@@ -930,8 +968,20 @@ provisionForm.addEventListener("submit", async (ev) => {
   try {
     const r = await api("POST", `/api/cameras/${provisionTargetId}/provision-cohn`, body);
     if (r.data) renderStatus(r.data);
-    toast("success", `${provisionName.textContent}: provisioned (${r.data?.cohn_ip || "ip pending"})`);
+    toast("success", `${provisionName.textContent}: joined Wi-Fi ✓ — connecting via COHN…`);
     provisionDialog.close();
+    // Step 2 of 2: auto-connect via COHN
+    const connectId = provisionTargetId;
+    if (connectId) {
+      setTimeout(async () => {
+        try {
+          await api("POST", `/api/cameras/${connectId}/connect`);
+          toast("success", `${provisionName.textContent}: connected via COHN`);
+        } catch (err) {
+          toast("warning", `${provisionName.textContent}: provisioned — click LINK to connect`);
+        }
+      }, 800);
+    }
   } catch (err) {
     provisionError.textContent = err.message;
     provisionError.classList.remove("hidden");
