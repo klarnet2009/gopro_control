@@ -946,13 +946,25 @@ const provisionError  = document.getElementById("provision-error");
 const provisionName   = document.getElementById("provision-name");
 let provisionTargetId = null;
 
-function onProvisionCohn(entry) {
+async function onProvisionCohn(entry) {
   provisionTargetId = entry.card.dataset.id;
   provisionName.textContent = entry.card.querySelector(".cam-name").textContent;
   provisionForm.reset();
   provisionError.classList.add("hidden");
   provisionDialog.showModal();
-  setTimeout(() => provisionForm.elements.ssid?.focus(), 30);
+  // Pre-fill SSID from host Wi-Fi (best-effort, silent on failure)
+  try {
+    const r = await api("GET", "/api/wifi-ssid");
+    const ssid = r?.data?.ssid;
+    if (ssid && provisionForm.elements.ssid) {
+      provisionForm.elements.ssid.value = ssid;
+      setTimeout(() => provisionForm.elements.password?.focus(), 30);
+    } else {
+      setTimeout(() => provisionForm.elements.ssid?.focus(), 30);
+    }
+  } catch {
+    setTimeout(() => provisionForm.elements.ssid?.focus(), 30);
+  }
 }
 
 document.getElementById("provision-cancel").addEventListener("click", () => provisionDialog.close());

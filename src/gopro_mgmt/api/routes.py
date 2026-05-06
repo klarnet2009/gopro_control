@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import platform
+import subprocess
+import re
 from shutil import which
 from typing import Awaitable, Callable
 
@@ -26,6 +29,53 @@ from .ws import WSBroadcaster
 log = logging.getLogger(__name__)
 
 ScanFn = Callable[[float], Awaitable[list[ScanResult]]]
+
+
+def _get_current_ssid() -> str | None:
+    """Read the current Wi-Fi SSID from the host OS. Returns None on failure."""
+    try:
+        system = platform.system()
+        if system == "Darwin":  # macOS
+            # Try networksetup first (reliable, no root needed)
+            for iface in ("en0", "en1", "en2"):
+                try:
+                    out = subprocess.check_output(
+                        ["networksetup", "-getairportnetwork", iface],
+                        stderr=subprocess.DEVNULL, timeout=3,
+                    ).decode(errors="replace").strip()
+                    # Output: "Current Wi-Fi Network: MySSID"
+                    if ":" in out and "not associated" not in out.lower():
+                        return out.split(":", 1)[1].strip() or None
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    continue
+        elif system == "Windows":
+            out = subprocess.check_output(
+                ["netsh", "wlan", "show", "interfaces"],
+                stderr=subprocess.DEVNULL, timeout=3,
+            ).decode(errors="replace")
+            m = re.search(r"^\s+SSID\s+:\s+(.+)$", out, re.MULTILINE)
+            if m:
+                return m.group(1).strip() or None
+        elif system == "Linux":
+            # Try nmcli (NetworkManager)
+            try:
+                out = subprocess.check_output(
+                    ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+                    stderr=subprocess.DEVNULL, timeout=3,
+                ).decode(errors="replace")
+                for line in out.splitlines():
+                    if line.startswith("yes:"):
+                        return line[4:].strip() or None
+            except FileNotFoundError:
+                pass
+            # Fallback: iwgetid
+            out = subprocess.check_output(
+                ["iwgetid", "-r"], stderr=subprocess.DEVNULL, timeout=3,
+            ).decode(errors="replace").strip()
+            return out or None
+    except Exception as exc:
+        log.debug("could not read Wi-Fi SSID: %s", exc)
+    return None
 
 
 def build_router() -> APIRouter:
@@ -167,6 +217,17 @@ def build_router() -> APIRouter:
         for s in payload:
             await _bus(request).broadcast({"type": "status", "payload": s})
         return CommandResult.success(payload)
+
+    @router.get("/wifi-ssid")
+    async def wifi_ssid(request: Request):
+        """Return the SSID of the host machine's current Wi-Fi connection.
+
+        Used to pre-fill the SSID field in the COHN provision wizard.
+        Returns {ssid: "..."} on success, {ssid: null} when not connected
+        or the platform is unsupported. Never raises — UI degrades gracefully.
+        """
+        ssid = await asyncio.get_event_loop().run_in_executor(None, _get_current_ssid)
+        return CommandResult.success({"ssid": ssid})
 
     @router.post("/scan")
     async def scan(request: Request):
