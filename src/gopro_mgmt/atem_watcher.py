@@ -57,6 +57,13 @@ class AtemWatcher:
             "auto-trigger enabled" if enabled else "auto-trigger disabled",
             level="ok" if enabled else "warn",
         )
+        # Disarm immediately when auto is turned off — late-arm should not
+        # fire after the operator explicitly opted out.
+        if not enabled and hasattr(self._manager, "set_armed"):
+            self._manager.set_armed(False)
+        elif enabled and self._recording and hasattr(self._manager, "set_armed"):
+            # Re-arm when auto is toggled back on while ATEM is still recording.
+            self._manager.set_armed(True)
         self._schedule(self._broadcast_status())
 
     def start(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -141,7 +148,8 @@ class AtemWatcher:
 
     def _discover_and_run(self) -> None:
         try:
-            from pyatem.locate import listen, stop as locate_stop
+            from pyatem.locate import listen
+            from pyatem.locate import stop as locate_stop
         except ImportError:
             log.error(
                 "zeroconf is not installed — cannot auto-discover ATEM. "
@@ -187,6 +195,10 @@ class AtemWatcher:
             self._connected = False
             self._recording = False
             self._recording_initialized = False
+            # Don't auto-roll late-connecting cameras while ATEM is unreachable —
+            # we no longer have a reliable signal to react to.
+            if hasattr(self._manager, "set_armed"):
+                self._manager.set_armed(False)
             self._record_event("connection", "offline", level="err")
             self._schedule(self._broadcast_status())
             self._stop.wait(_RECONNECT_DELAY)
@@ -259,6 +271,12 @@ class AtemWatcher:
             f"REC {'ON' if new_val else 'OFF'} via {source}",
             level="rec" if new_val else "warn",
         )
+        # Arm the manager on transition-to-True only. We deliberately do NOT
+        # disarm here on REC=False — that's handled in _confirmed_stop_all
+        # after the false-stop debounce window so a 1-sample REC=false blip
+        # doesn't briefly disable late-arm during a still-active recording.
+        if new_val and self._auto_enabled and hasattr(self._manager, "set_armed"):
+            self._manager.set_armed(True)
         self._schedule(self._broadcast_status())
         if not self._auto_enabled:
             self._record_event("command", "auto disabled; no camera command", level="warn")
@@ -279,6 +297,10 @@ class AtemWatcher:
         if self._recording or self._last_recording_update != started:
             log.info("ATEM stop ignored because recording state changed during confirmation")
             return
+        # Stop confirmed: disarm so late-connecting cameras don't auto-roll
+        # against a finished session, then issue the actual stop broadcast.
+        if hasattr(self._manager, "set_armed"):
+            self._manager.set_armed(False)
         await self._manager.stop_all()
 
     async def _broadcast_status(self) -> None:

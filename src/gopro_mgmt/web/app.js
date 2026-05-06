@@ -1330,11 +1330,30 @@ function setWsState(state) {
   wsLabelEl.textContent = ({open: "live", closed: "offline", connecting: "linking…"}[state]) || state;
 }
 
+// Reconnect backoff state. Reset to baseline on a successful open so a brief
+// network glitch doesn't push us to the 30 s cap; grows exponentially while
+// we keep failing so the server isn't hammered after a long outage.
+const WS_BACKOFF_MIN_MS = 1000;
+const WS_BACKOFF_MAX_MS = 30000;
+let wsBackoffMs = WS_BACKOFF_MIN_MS;
+
+function nextWsBackoff() {
+  // ±25 % jitter prevents stampede when many clients reconnect simultaneously
+  // (e.g. server restart). Math.random returns [0, 1).
+  const jitter = wsBackoffMs * (0.75 + Math.random() * 0.5);
+  const delay = Math.min(jitter, WS_BACKOFF_MAX_MS);
+  wsBackoffMs = Math.min(wsBackoffMs * 2, WS_BACKOFF_MAX_MS);
+  return delay;
+}
+
 function connectWS() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   setWsState("connecting");
-  ws.addEventListener("open", () => setWsState("open"));
+  ws.addEventListener("open", () => {
+    setWsState("open");
+    wsBackoffMs = WS_BACKOFF_MIN_MS;
+  });
   ws.addEventListener("message", (ev) => {
     const msg = JSON.parse(ev.data);
     switch (msg.type) {
@@ -1360,7 +1379,7 @@ function connectWS() {
   });
   ws.addEventListener("close", () => {
     setWsState("closed");
-    setTimeout(connectWS, 3000);
+    setTimeout(connectWS, nextWsBackoff());
   });
   ws.addEventListener("error", () => ws.close());
 }

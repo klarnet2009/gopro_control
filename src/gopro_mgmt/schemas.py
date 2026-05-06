@@ -4,7 +4,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 ConnectionState = Literal["disconnected", "connecting", "connected", "error"]
 ConnectionMode = Literal["ble", "ble+wifi", "cohn"]
 
@@ -50,6 +49,33 @@ class ServerConfig(BaseModel):
     port: int = 8000
 
 
+class TimingConfig(BaseModel):
+    """Tunable timing knobs.
+
+    Defaults match the legacy hard-coded constants. Override in config.yaml
+    under ``timing:`` to adapt to laggy networks or aggressive cameras.
+    """
+    # Manager: suppress spurious encoding=True from camera while file is being
+    # finalised after a stop ACK.
+    stop_grace_sec: float = 8.0
+    # Manager: minimum gap between a stop ACK and the next start command.
+    post_stop_recovery_sec: float = 4.0
+    # Manager: how often refresh_status() re-reads BLE RSSI for connected cams.
+    rssi_poll_interval_sec: float = 15.0
+    # Driver: hard ceiling on any single BLE round-trip; protects against SDK
+    # response-queue deadlocks.
+    ble_cmd_timeout_sec: float = 8.0
+    # Driver: short timeout for incidental BLE detail reads (battery, fps).
+    ble_detail_timeout_sec: float = 1.5
+    # Driver: HTTP command timeout over COHN.
+    http_cmd_timeout_sec: float = 12.0
+    # Driver: HTTP shutter (start/stop) timeout over COHN — generous because the
+    # camera takes time to spin up the recorder.
+    http_shutter_timeout_sec: float = 15.0
+    # Driver: COHN keep-alive cadence (camera idle-sleep is ~30 s).
+    cohn_keepalive_sec: float = 25.0
+
+
 class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     poll_interval_sec: float = 2.0
@@ -58,6 +84,7 @@ class AppConfig(BaseModel):
         default=None,
         description="ATEM IP address. If null, auto-discover via mDNS (_blackmagic._tcp.local.).",
     )
+    timing: TimingConfig = Field(default_factory=TimingConfig)
 
 
 class CameraStatus(BaseModel):
@@ -86,6 +113,12 @@ class CameraStatus(BaseModel):
     cohn_provisioned: bool = False
     # Last-known camera IP from cohn_db.json (informational only).
     cohn_ip: str | None = None
+    # BLE telemetry observer health: how many of the seven push-notification
+    # observers (battery, sd_remaining, preset_group, resolution, fps, lens,
+    # hypersmooth) are currently delivering updates. ``None`` for COHN cameras
+    # (no observers) and for cameras that pre-date driver health reporting.
+    observers_alive: int | None = None
+    observers_total: int | None = None
 
 
 class CameraSettingsPayload(BaseModel):
@@ -113,11 +146,11 @@ class CommandResult(BaseModel):
     error: dict[str, str] | None = None
 
     @classmethod
-    def success(cls, data: Any | None = None) -> "CommandResult":
+    def success(cls, data: Any | None = None) -> CommandResult:
         return cls(ok=True, data=data)
 
     @classmethod
-    def failure(cls, code: str, message: str) -> "CommandResult":
+    def failure(cls, code: str, message: str) -> CommandResult:
         return cls(ok=False, error={"code": code, "message": message})
 
 

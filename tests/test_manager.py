@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from gopro_mgmt.manager import CameraAlreadyExists, CameraManager, CameraNotFound, POST_STOP_RECOVERY_SEC
+from gopro_mgmt.manager import POST_STOP_RECOVERY_SEC, CameraAlreadyExists, CameraManager, CameraNotFound
 from gopro_mgmt.schemas import CameraConfig
 from tests.conftest import FakeDriver
 
@@ -227,7 +227,7 @@ def _patch_provision_driver(monkeypatch):
     from gopro_mgmt import manager as mgr_mod
 
     class _StubDriver:
-        def __init__(self, target, *, mode="ble"):
+        def __init__(self, target, *, mode="ble", **_kwargs):
             self.target = target
             self.mode = mode
 
@@ -348,3 +348,96 @@ async def test_disconnect_clears_min_start_at(manager: CameraManager):
 
     await manager.disconnect("cam-a")
     assert manager._entry("cam-a").min_start_at == 0.0
+
+
+# ── ATEM late-arm ────────────────────────────────────────────────────────────
+
+
+async def test_set_armed_toggles_property(manager: CameraManager):
+    assert manager.armed is False
+    manager.set_armed(True)
+    assert manager.armed is True
+    manager.set_armed(False)
+    assert manager.armed is False
+
+
+async def test_late_connecting_camera_starts_recording_when_armed(manager: CameraManager):
+    """Camera that connects while manager is armed must auto-roll."""
+    manager.set_armed(True)
+    status = await manager.connect("cam-a")
+    # connect() returns post-shutter status; must show encoding=True.
+    assert status.encoding is True
+    drv = FakeDriver.instances[-1]
+    assert drv.start_count == 1
+
+
+async def test_late_arm_skipped_when_not_armed(manager: CameraManager):
+    """Default connect path must not roll the camera."""
+    status = await manager.connect("cam-a")
+    assert status.encoding is False
+    drv = FakeDriver.instances[-1]
+    assert drv.start_count == 0
+
+
+async def test_stop_timeout_recovery_still_sets_post_stop_guards():
+    """Regression for BL-01: when stop_recording times out but get_status
+    confirms the camera DID stop, _shutter must still set stop_confirmed_at
+    and min_start_at — otherwise refresh_status leaks encoding=True during
+    finalize and a fast-follow start bypasses post_stop_recovery_sec.
+    """
+    cfg = CameraConfig(id="cam-z", name="Cam Z", target="ZZZZ")
+
+    class _TimingOutDriver(FakeDriver):
+        async def stop_recording(self):
+            # Pretend the BLE command timed out, but the camera actually
+            # stopped (typical SDK queue-deadlock recovery scenario).
+            self.encoding = False
+            raise TimeoutError("BLE shutter timeout")
+
+    mgr = CameraManager([cfg], driver_factory=lambda c: _TimingOutDriver(c.target))
+    await mgr.connect("cam-z")
+    await mgr.start("cam-z")
+    before = time.monotonic()
+    status = await mgr.stop("cam-z")
+
+    # Recovery branch returned success because the camera did stop.
+    assert status.encoding is False
+    entry = mgr._entry("cam-z")
+    # The whole point of BL-01: these MUST be populated even on the
+    # timeout-recovered path, not just the happy path.
+    assert entry.stop_confirmed_at >= before
+    assert entry.min_start_at >= before + POST_STOP_RECOVERY_SEC - 0.1
+
+
+async def test_supported_caps_cleared_on_disconnect(manager: CameraManager):
+    """Regression for HI-02: supported_caps populated by get_settings must NOT
+    survive a disconnect, otherwise stale Hero-9 caps would reject Hero-12
+    settings after a target swap.
+    """
+    await manager.connect("cam-a")
+    # Inject caps directly to skip the FakeDriver get_video_capabilities path.
+    entry = manager._entry("cam-a")
+    entry.supported_caps = {"resolution": ["1080p"], "fps": ["30"]}
+
+    await manager.disconnect("cam-a")
+    assert entry.supported_caps is None
+
+
+async def test_late_arm_skipped_when_already_recording():
+    """If the camera somehow reports encoding=True on connect (e.g. it was already
+    rolling from a previous session), late-arm must NOT issue a duplicate start.
+    """
+    cfg = CameraConfig(id="cam-z", name="Cam Z", target="ZZZZ")
+    mgr = CameraManager([cfg], driver_factory=_make_pre_recording_driver)
+    mgr.set_armed(True)
+    status = await mgr.connect("cam-z")
+    assert status.encoding is True
+    drv = FakeDriver.instances[-1]
+    assert drv.start_count == 0
+
+
+def _make_pre_recording_driver(_cfg):
+    """Helper for pre-set encoding=True scenario."""
+    d = FakeDriver(_cfg.target, mode=_cfg.mode)
+    d.encoding = True
+    return d

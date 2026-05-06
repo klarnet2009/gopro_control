@@ -13,7 +13,7 @@ from gopro_mgmt.schemas import AppConfig, CameraConfig, ServerConfig
 class FakeDriver:
     """In-memory stand-in for WirelessGoPro used across the test suite."""
 
-    instances: list["FakeDriver"] = []
+    instances: list[FakeDriver] = []
 
     def __init__(self, target: str, *, mode: str = "ble", enable_wifi: bool = False) -> None:
         # Accept BOTH old (enable_wifi=) and new (mode=) ctor signatures so

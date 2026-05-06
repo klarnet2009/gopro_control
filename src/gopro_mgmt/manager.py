@@ -1,53 +1,25 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from .driver import COHN_DB_PATH, CameraDriver, WirelessGoProDriver, default_driver_factory
-from .schemas import CameraConfig, CameraStatus, ScanResult
+from .cohn_db import read_cohn_db_for as _read_cohn_db_for
+from .driver import CameraDriver, WirelessGoProDriver, default_driver_factory
+from .schemas import CameraConfig, CameraStatus, ScanResult, TimingConfig
 
 log = logging.getLogger(__name__)
 
-RSSI_POLL_INTERVAL = 15.0  # seconds between BLE RSSI reads
-
 DriverFactory = Callable[[CameraConfig], CameraDriver]
 
-
-def _read_cohn_db_for(target: str) -> dict | None:
-    """Read cohn_db.json (TinyDB format) and return credentials matching target.
-
-    The TinyDB layout is:
-        {"_default": {"1": {"serial": "ABCD", "credentials": {...}}, ...}}
-
-    Returns the credentials dict (or whatever the SDK stores) for the entry whose
-    serial endswith the target, or None on any failure / no match. Caller must
-    treat None as 'no credentials' — never raise.
-    """
-    try:
-        if not COHN_DB_PATH.exists():
-            return None
-        raw = COHN_DB_PATH.read_text(encoding="utf-8")
-        if not raw.strip():
-            return None
-        data = json.loads(raw)
-        records = (data.get("_default") or {}) if isinstance(data, dict) else {}
-        target_low = str(target).lower()
-        for rec in records.values():
-            if not isinstance(rec, dict):
-                continue
-            serial = str(rec.get("serial", "")).lower()
-            if serial.endswith(target_low):
-                creds = rec.get("credentials")
-                if isinstance(creds, dict):
-                    return creds
-                return rec
-    except Exception as exc:
-        log.debug("could not read %s for target %s: %s", COHN_DB_PATH, target, exc)
-    return None
+# Re-exported for tests that want the canonical default values without
+# instantiating a TimingConfig. Live code reads from manager._timing instead.
+_DEFAULT_TIMING = TimingConfig()
+STOP_GRACE = _DEFAULT_TIMING.stop_grace_sec
+POST_STOP_RECOVERY_SEC = _DEFAULT_TIMING.post_stop_recovery_sec
+RSSI_POLL_INTERVAL = _DEFAULT_TIMING.rssi_poll_interval_sec
 
 
 @dataclass
@@ -58,14 +30,15 @@ class _Entry:
     lock: asyncio.Lock
     rssi_updated_at: float = field(default=0.0)
     # Monotonic timestamp of the last confirmed stop. Poller ignores encoding=True
-    # from the camera for STOP_GRACE seconds after this (camera still finalises file).
+    # from the camera for timing.stop_grace_sec after this (camera still finalises file).
     stop_confirmed_at: float = field(default=0.0)
     # Earliest time a start command may be sent after a stop ACK.
     min_start_at: float = field(default=0.0)
-
-
-STOP_GRACE = 8.0  # seconds to suppress spurious encoding=True after a stop ACK
-POST_STOP_RECOVERY_SEC = 4.0  # min gap between stop-ACK and next start
+    # Supported values per setting field, populated lazily by get_settings().
+    # When present, apply_settings() validates payloads against this dict and
+    # rejects unsupported values before they reach the SDK. When absent
+    # (camera never queried for caps), validation is skipped.
+    supported_caps: dict[str, list[str]] | None = field(default=None)
 
 
 class CameraNotFound(KeyError):
@@ -83,10 +56,23 @@ class CameraManager:
         self,
         cameras: list[CameraConfig],
         driver_factory: DriverFactory | None = None,
+        timing: TimingConfig | None = None,
     ) -> None:
-        self._driver_factory = driver_factory or default_driver_factory
+        self._timing = timing or TimingConfig()
+        # The default factory needs the timing config; bind it via closure so
+        # the public DriverFactory protocol stays Callable[[CameraConfig], ...]
+        # and existing tests that pass a custom driver_factory keep working.
+        if driver_factory is None:
+            t = self._timing
+            self._driver_factory = lambda cfg: default_driver_factory(cfg, timing=t)
+        else:
+            self._driver_factory = driver_factory
         self._entries: dict[str, _Entry] = {}
         self._mutate_lock = asyncio.Lock()
+        # External "should be recording right now" signal — set by AtemWatcher
+        # when the switcher is in record state. Late-connecting cameras consult
+        # this so the operator doesn't have to nudge them manually.
+        self._armed: bool = False
         for cfg in cameras:
             self._entries[cfg.id] = self._build_entry(cfg)
 
@@ -105,6 +91,18 @@ class CameraManager:
         )
 
     # --- queries -------------------------------------------------------------
+
+    def set_armed(self, armed: bool) -> None:
+        """Tell the manager whether external trigger source is in record state.
+
+        Used by AtemWatcher: when the switcher transitions to recording, calls
+        ``set_armed(True)`` so cameras connecting afterwards auto-roll.
+        """
+        self._armed = armed
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
 
     def list_status(self) -> list[CameraStatus]:
         return [e.status.model_copy() for e in self._entries.values()]
@@ -182,23 +180,35 @@ class CameraManager:
                 log.info("updated camera %s: %s", cam_id, updates)
             return e.status.model_copy()
 
+    async def _do_disconnect(self, e: _Entry, cam_id: str) -> None:
+        """Tear down the driver and reset session-scoped entry state.
+
+        Caller must hold ``e.lock``. ``rssi_dbm`` is intentionally preserved
+        so the card still shows last-known signal while offline.
+        """
+        drv = e.driver
+        e.driver = None
+        if drv is not None:
+            try:
+                await drv.close()
+            except Exception:
+                log.exception("close failed for %s", cam_id)
+        e.status.connection = "disconnected"
+        e.status.encoding = None
+        e.status.observers_alive = None
+        e.status.observers_total = None
+        e.min_start_at = 0.0
+        # supported_caps was populated for the previous physical camera; the
+        # next session may be a different model after a target/mode change.
+        e.supported_caps = None
+
     async def _disconnect_locked(self, cam_id: str) -> None:
         """Internal helper — must be called only from within _mutate_lock."""
         e = self._entries.get(cam_id)
         if e is None:
             return
         async with e.lock:
-            drv = e.driver
-            e.driver = None
-            if drv is not None:
-                try:
-                    await drv.close()
-                except Exception:
-                    log.exception("close failed for %s", cam_id)
-            e.status.connection = "disconnected"
-            e.status.encoding = None
-            e.min_start_at = 0.0
-            # Keep last known rssi so the card shows it while offline
+            await self._do_disconnect(e, cam_id)
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -239,22 +249,28 @@ class CameraManager:
                 e.status.last_error = str(exc)
                 log.exception("connect failed for %s", cam_id)
                 raise
-            return e.status.model_copy()
+            connected_status = e.status.model_copy()
+
+        # ATEM late-arm: if the external trigger is currently in record state
+        # but this camera came online after the start command was issued, roll
+        # it now so the operator doesn't have to chase it manually. Run after
+        # releasing e.lock so _shutter() can re-acquire it cleanly.
+        if self._armed and connected_status.encoding is not True:
+            try:
+                connected_status = await self._shutter(cam_id, on=True)
+                log.info("late-armed %s: shutter started to match ATEM record state", cam_id)
+            except Exception as exc:
+                log.exception("late-arm shutter failed for %s", cam_id)
+                # Surface the failure on the camera card; otherwise the user
+                # sees a "connected" green tile that silently isn't recording.
+                e.status.last_error = f"late-arm failed: {exc}"
+                connected_status = e.status.model_copy()
+        return connected_status
 
     async def disconnect(self, cam_id: str) -> CameraStatus:
         e = self._entry(cam_id)
         async with e.lock:
-            drv = e.driver
-            e.driver = None
-            if drv is not None:
-                try:
-                    await drv.close()
-                except Exception:
-                    log.exception("close failed for %s", cam_id)
-            e.status.connection = "disconnected"
-            e.status.encoding = None
-            e.min_start_at = 0.0
-            # Keep last known rssi so the card shows it while offline
+            await self._do_disconnect(e, cam_id)
             return e.status.model_copy()
 
     async def shutdown(self) -> None:
@@ -281,16 +297,31 @@ class CameraManager:
         """Return current + supported resolution/fps from the camera over BLE.
 
         Requires the camera to be connected. Returns an empty dict if not.
+        Caches the supported_* lists on the entry so apply_settings() can
+        validate user input without re-querying the camera.
         """
         e = self._entry(cam_id)
         async with e.lock:
             if e.driver is None:
                 return {}
             try:
-                return await e.driver.get_video_capabilities()
+                caps = await e.driver.get_video_capabilities()
             except Exception as exc:
                 log.warning("get_settings failed for %s: %s", cam_id, exc)
                 return {}
+            supported: dict[str, list[str]] = {}
+            for cap_key, payload_key in (
+                ("supported_resolutions", "resolution"),
+                ("supported_fps", "fps"),
+                ("supported_lenses", "lens"),
+                ("supported_hypersmooth", "hypersmooth"),
+            ):
+                values = caps.get(cap_key)
+                if isinstance(values, list) and values:
+                    supported[payload_key] = list(values)
+            if supported:
+                e.supported_caps = supported
+            return caps
 
     async def apply_settings(
         self,
@@ -308,6 +339,23 @@ class CameraManager:
                 raise RuntimeError(f"camera {cam_id} is not connected")
             if e.status.encoding:
                 raise RuntimeError("cannot change settings while recording")
+            if e.supported_caps:
+                requested = {
+                    "resolution": resolution,
+                    "fps": fps,
+                    "lens": lens,
+                    "hypersmooth": hypersmooth,
+                }
+                for key, value in requested.items():
+                    if value is None:
+                        continue
+                    allowed = e.supported_caps.get(key)
+                    if allowed is None or value in allowed:
+                        continue
+                    raise ValueError(
+                        f"{key}={value!r} is not supported by camera {cam_id} "
+                        f"(allowed: {', '.join(allowed)})"
+                    )
             try:
                 await e.driver.set_video_settings(resolution, fps, lens=lens, hypersmooth=hypersmooth)
                 # Mirror new values into status immediately
@@ -326,6 +374,46 @@ class CameraManager:
                 raise
             return e.status.model_copy()
 
+    async def start_preview(
+        self,
+        cam_id: str,
+        *,
+        resolution: str = "720",
+        fov: str = "WIDE",
+    ) -> str:
+        """Open the COHN webcam mode and return the RTSP URL the client can stream.
+
+        Camera must be connected and in COHN mode. Acquires the per-camera lock
+        for the duration of the BLE/HTTP round-trip so concurrent shutter or
+        settings commands don't interleave. The HTTP layer (routes.py) is
+        responsible for the ffmpeg/MJPEG transcoding lifecycle on top of this.
+        """
+        e = self._entry(cam_id)
+        if e.config.mode != "cohn":
+            raise RuntimeError(f"camera {cam_id} must be in COHN mode for preview")
+        if e.status.connection != "connected":
+            raise RuntimeError(f"camera {cam_id} is not connected")
+        async with e.lock:
+            if e.driver is None:
+                raise RuntimeError(f"camera {cam_id} driver is not open")
+            return await e.driver.start_webcam_rtsp(resolution=resolution, fov=fov)
+
+    async def stop_preview(self, cam_id: str) -> None:
+        """Tell the camera to leave webcam mode. Best-effort; no-op if disconnected."""
+        try:
+            e = self._entry(cam_id)
+        except CameraNotFound:
+            return
+        if e.driver is None:
+            return
+        async with e.lock:
+            if e.driver is None:
+                return
+            try:
+                await e.driver.stop_webcam()
+            except Exception:
+                log.exception("stop_webcam failed for %s", cam_id)
+
     async def provision_cohn(self, cam_id: str, ssid: str, password: str) -> CameraStatus:
         """Run BLE-based COHN provisioning for one camera.
 
@@ -337,7 +425,7 @@ class CameraManager:
         async with e.lock:
             if e.driver is not None:
                 raise RuntimeError(f"camera {cam_id} must be disconnected before provisioning")
-            tmp = WirelessGoProDriver(e.config.target, mode="ble")
+            tmp = WirelessGoProDriver(e.config.target, mode="ble", timing=self._timing)
             try:
                 info = await tmp.provision_cohn(ssid, password)
                 e.status.cohn_provisioned = True
@@ -413,7 +501,7 @@ class CameraManager:
                 data = await e.driver.get_status()
                 encoding = data.get("encoding")
                 # Suppress spurious encoding=True while GoPro finalises the file
-                if encoding and (time.monotonic() - e.stop_confirmed_at < STOP_GRACE):
+                if encoding and (time.monotonic() - e.stop_confirmed_at < self._timing.stop_grace_sec):
                     encoding = False
                 e.status.encoding = encoding
                 for key in ("battery_percent", "sd_remaining_sec", "preset_group"):
@@ -423,12 +511,21 @@ class CameraManager:
             except Exception as exc:
                 e.status.last_error = str(exc)
                 log.warning("status refresh failed for %s: %s", cam_id, exc)
-            if time.monotonic() - e.rssi_updated_at >= RSSI_POLL_INTERVAL:
+            if time.monotonic() - e.rssi_updated_at >= self._timing.rssi_poll_interval_sec:
                 try:
                     e.status.rssi_dbm = await e.driver.get_rssi()
                     e.rssi_updated_at = time.monotonic()
                 except Exception as exc:
                     log.debug("rssi refresh failed for %s: %s", cam_id, exc)
+            # Optional: drivers that track BLE telemetry observers expose health.
+            # Driver Protocol does not require this, so check before calling.
+            if hasattr(e.driver, "get_observer_health"):
+                try:
+                    health = e.driver.get_observer_health()
+                    e.status.observers_alive = health.get("alive")
+                    e.status.observers_total = health.get("total")
+                except Exception as exc:
+                    log.debug("observer health read failed for %s: %s", cam_id, exc)
             return e.status.model_copy()
 
     # --- internals -----------------------------------------------------------
@@ -467,9 +564,9 @@ class CameraManager:
                     e.status.encoding = False
                     now = time.monotonic()
                     e.stop_confirmed_at = now
-                    e.min_start_at = now + POST_STOP_RECOVERY_SEC
+                    e.min_start_at = now + self._timing.post_stop_recovery_sec
                 e.status.last_error = None
-            except (TimeoutError, asyncio.TimeoutError) as exc:
+            except TimeoutError as exc:
                 # BLE can report the shutter result through async status just
                 # after the command path times out. If the desired recording
                 # state is already visible, keep the session alive instead of
@@ -483,6 +580,14 @@ class CameraManager:
                         if e.status.encoding is on:
                             e.status.connection = "connected"
                             e.status.last_error = None
+                            # Apply the same post-stop bookkeeping as the
+                            # success path: the camera DID reach the desired
+                            # state, so encoding-finalize debouncing and the
+                            # next-start cooldown must still fire.
+                            if not on:
+                                now = time.monotonic()
+                                e.stop_confirmed_at = now
+                                e.min_start_at = now + self._timing.post_stop_recovery_sec
                             log.warning(
                                 "shutter %s timed out for %s, but camera reached desired state",
                                 "start" if on else "stop",

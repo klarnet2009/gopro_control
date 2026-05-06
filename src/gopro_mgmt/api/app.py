@@ -28,7 +28,11 @@ def create_app(
     config_store: ConfigStore | None = None,
     scan_fn: ScanFn | None = None,
 ) -> FastAPI:
-    manager = CameraManager(config.cameras, driver_factory=driver_factory)
+    manager = CameraManager(
+        config.cameras,
+        driver_factory=driver_factory,
+        timing=config.timing,
+    )
     broadcaster = WSBroadcaster()
     poller = StatusPoller(manager, broadcaster, interval_sec=config.poll_interval_sec)
     atem_watcher = AtemWatcher(

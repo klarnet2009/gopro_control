@@ -11,20 +11,22 @@ requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Aleksejs Ivanovs", email = "Aleksejs.Ivanovs@iterum.lv" }]
 dependencies = [
-    "open_gopro>=0.18.0",
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
-    "pydantic>=2.6",
-    "pydantic-settings>=2.2",
-    "PyYAML>=6.0",
-    "pyatem>=0.10.0",
+    # open_gopro BLE/COHN enums and observable APIs change between minor releases;
+    # cap tightly and bump deliberately after re-running the manager test suite.
+    "open_gopro>=0.22,<0.23",
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.27,<1.0",
+    "pydantic>=2.6,<3.0",
+    "pydantic-settings>=2.2,<3.0",
+    "PyYAML>=6.0,<7.0",
+    "pyatem>=0.10,<0.11",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "httpx>=0.27",
+    "pytest>=8.0,<10.0",
+    "pytest-asyncio>=0.23,<2.0",
+    "httpx>=0.27,<1.0",
 ]
 
 [project.scripts]
@@ -34,8 +36,39 @@ gopro-mgmt = "gopro_mgmt.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-gopro_mgmt = ["web/*.html", "web/*.js", "web/*.css"]
+# Ship web assets and the py.typed marker so downstream tools see the
+# project as PEP 561 typed.
+gopro_mgmt = ["web/*.html", "web/*.js", "web/*.css", "py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+src = ["src", "tests"]
+extend-exclude = [".venv", ".planning", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "ASYNC",
+]
+ignore = [
+    "E501",      # line length is enforced by formatter, not linter
+    "E701",      # one-line try/except in preview handler is intentional
+    "B008",      # function-call default args (FastAPI Depends pattern)
+    "B904",      # raise from — pre-existing style throughout codebase
+    "B905",      # zip(strict=) — broadcast() relies on equal-length iterables
+    "B023",      # mDNS discovery closures are scoped to one iteration; safe
+    "ASYNC109",  # ``timeout`` parameter is a callee-config, not awaited here
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # pytest assert statements may use mutable defaults
