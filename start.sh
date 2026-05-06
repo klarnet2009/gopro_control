@@ -49,6 +49,8 @@ if lsof -ti :8000 &>/dev/null; then
 fi
 
 # ── Start server ─────────────────────────────────────────────────────────────
+chflags nohidden "$SCRIPT_DIR"/.venv/lib/python*/site-packages/*.pth \
+  "$SCRIPT_DIR"/.venv/lib/python*/site-packages/__editable__*.pth 2>/dev/null || true
 source "$SCRIPT_DIR/.venv/bin/activate"
 
 echo "  Starting server…  (logs → .gopro_server.log)"

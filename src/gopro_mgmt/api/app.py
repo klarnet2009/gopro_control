@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -8,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from ..atem_watcher import AtemWatcher
 from ..config_store import ConfigStore
 from ..manager import CameraManager, DriverFactory
 from ..poller import StatusPoller
@@ -29,10 +31,16 @@ def create_app(
     manager = CameraManager(config.cameras, driver_factory=driver_factory)
     broadcaster = WSBroadcaster()
     poller = StatusPoller(manager, broadcaster, interval_sec=config.poll_interval_sec)
+    atem_watcher = AtemWatcher(
+        manager=manager,
+        broadcaster=broadcaster,
+        host=config.atem_host,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         poller.start()
+        atem_watcher.start(asyncio.get_running_loop())
         try:
             yield
         finally:
@@ -47,6 +55,7 @@ def create_app(
                     except Exception:
                         pass
                 procs.clear()
+            atem_watcher.stop()
             await poller.stop()
             await manager.shutdown()
 
@@ -54,6 +63,7 @@ def create_app(
     app.state.manager = manager
     app.state.broadcaster = broadcaster
     app.state.poller = poller
+    app.state.atem_watcher = atem_watcher
     app.state.config = config
     app.state.config_store = config_store
     if scan_fn is not None:

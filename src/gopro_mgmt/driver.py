@@ -27,6 +27,7 @@ BLE_CMD_TIMEOUT = 8.0
 HTTP_CMD_TIMEOUT     = 12.0
 HTTP_SHUTTER_TIMEOUT = 15.0
 COHN_KEEPALIVE_SEC   = 25.0   # camera idle-sleep is ~30s; pad a little
+BLE_DETAIL_TIMEOUT   = 1.5
 
 # Resolve cohn_db.json relative to project root, NOT cwd. From this file
 # (src/gopro_mgmt/driver.py), parents[2] is the project root. open_gopro
@@ -96,6 +97,7 @@ _HYPERSMOOTH_LABELS: dict[str, str] = {
 # Build reverse maps after the label dicts are defined
 _LENS_REVERSE = {v: k for k, v in _LENS_LABELS.items()}
 _HYPERSMOOTH_REVERSE = {v: k for k, v in _HYPERSMOOTH_LABELS.items()}
+_PRESET_GROUPS = {1000, 1001, 1002}
 
 # ── Per-model capability tables ───────────────────────────────────────────────
 # Used as a fallback when the BLE get_capabilities() query fails or returns
@@ -164,6 +166,22 @@ def _enum_to_hypersmooth(val: Any) -> str | None:
     return _HYPERSMOOTH_LABELS.get(name, name.replace("_", " ").title() if name else None)
 
 
+def _valid_status_value(key: str, value: Any) -> Any | None:
+    try:
+        if key == "battery_percent":
+            value = int(value)
+            return value if 0 <= value <= 100 else None
+        if key == "sd_remaining_sec":
+            value = int(value)
+            return value if 0 <= value <= 7 * 24 * 3600 else None
+        if key == "preset_group":
+            value = int(value)
+            return value if value in _PRESET_GROUPS else None
+    except (TypeError, ValueError):
+        return None
+    return value
+
+
 class CameraDriver(Protocol):
     async def open(self) -> None: ...
     async def close(self) -> None: ...
@@ -194,6 +212,10 @@ class WirelessGoProDriver:
         self._gopro: Any | None = None
         self._model: str | None = None
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._ble_detail_tasks: list[asyncio.Task[None]] = []
+        self._ble_register_lock = asyncio.Lock()
+        self._ble_status_cache: dict[str, Any] = {}
+        self._ble_setting_cache: dict[str, Any] = {}
 
     async def open(self) -> None:
         from open_gopro import WirelessGoPro  # lazy import
@@ -231,18 +253,24 @@ class WirelessGoProDriver:
 
         self._gopro = WirelessGoPro(target=self._target, interfaces=interfaces, **kwargs)
 
-        # Workaround for open_gopro 0.22: WirelessGoPro.open() unconditionally
-        # awaits self.cohn.wait_until_ready() with a 30s timeout, even when COHN
-        # is not in `interfaces`. Cameras that don't support COHN respond
-        # INVALID_PARAM and `_ready_event` is never set, so open() hangs
-        # ~30s × 5 retries before giving up. Skip on BLE / BLE+WiFi only.
+        # Workaround for open_gopro 0.22: CohnFeature.open() starts a BLE COHN
+        # status observer even when COHN is not requested. On COHN-capable
+        # cameras this observer can interleave RESPONSE_GET_COHN_STATUS packets
+        # with normal BLE setting/status responses, locking the SDK response
+        # queue and leaving battery/settings blank. BLE / BLE+WiFi sessions do
+        # not need this feature, so make it inert for the long-lived connection.
+        async def _skip_cohn_open(*_args: Any, **_kwargs: Any) -> None:
+            return
+
         async def _skip_cohn_wait() -> None:
             return
 
+        self._gopro.cohn.open = _skip_cohn_open
         self._gopro.cohn.wait_until_ready = _skip_cohn_wait
 
         await self._gopro.open()
         self._model = await self._read_model()
+        self._start_ble_detail_observers()
         log.info("opened camera target=%s mode=%s model=%s", self._target, self._mode, self._model)
 
     async def close(self) -> None:
@@ -254,6 +282,11 @@ class WirelessGoProDriver:
             except (asyncio.CancelledError, Exception):
                 pass
             self._keepalive_task = None
+        for task in self._ble_detail_tasks:
+            task.cancel()
+        if self._ble_detail_tasks:
+            await asyncio.gather(*self._ble_detail_tasks, return_exceptions=True)
+            self._ble_detail_tasks.clear()
         if self._gopro is None:
             return
         try:
@@ -304,6 +337,70 @@ class WirelessGoProDriver:
     def get_model(self) -> str | None:
         """Return the cached camera model name (populated during open())."""
         return self._model
+
+    def _cached_encoding(self) -> bool | None:
+        if self._gopro is None:
+            return None
+        value = getattr(self._gopro, "_encoding", None)
+        return bool(value) if value is not None else None
+
+    def _cached_busy(self) -> bool | None:
+        if self._gopro is None:
+            return None
+        value = getattr(self._gopro, "_busy", None)
+        return bool(value) if value is not None else None
+
+    def _start_ble_detail_observers(self) -> None:
+        if self._gopro is None or self._mode == "cohn":
+            return
+        gp = self._gopro
+        specs = (
+            ("status", "battery_percent", gp.ble_status.internal_battery_percentage, int),
+            ("status", "sd_remaining_sec", gp.ble_status.remaining_video_time, int),
+            ("status", "preset_group", gp.ble_status.preset_group, int),
+            ("setting", "resolution", gp.ble_setting.video_resolution, _enum_to_resolution),
+            ("setting", "fps", gp.ble_setting.frames_per_second, _enum_to_fps),
+            ("setting", "lens", gp.ble_setting.video_lens, _enum_to_lens),
+            ("setting", "hypersmooth", gp.ble_setting.hypersmooth, _enum_to_hypersmooth),
+        )
+        for cache_name, key, attr, converter in specs:
+            self._ble_detail_tasks.append(
+                asyncio.create_task(
+                    self._observe_ble_value(cache_name, key, attr, converter),
+                    name=f"ble-observe-{key}-{self._target}",
+                )
+            )
+
+    async def _observe_ble_value(self, cache_name: str, key: str, attr: Any, converter: Any) -> None:
+        try:
+            async with self._ble_register_lock:
+                result = await asyncio.wait_for(attr.get_value_observable(), timeout=BLE_CMD_TIMEOUT)
+            observable = result.unwrap()
+            self._cache_ble_value(cache_name, key, getattr(observable, "current", None), converter)
+            async for value in observable.observe(debug_id=f"{self._target}:{key}"):
+                self._cache_ble_value(cache_name, key, value, converter)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("BLE observer for %s failed on target=%s: %s", key, self._target, exc)
+
+    def _cache_ble_value(self, cache_name: str, key: str, raw: Any, converter: Any) -> None:
+        if raw is None:
+            return
+        try:
+            value = converter(raw) if converter is not None else raw
+        except Exception:
+            log.debug("could not convert BLE %s=%r for target=%s", key, raw, self._target)
+            return
+        if value is None:
+            return
+        if cache_name == "status":
+            value = _valid_status_value(key, value)
+            if value is None:
+                log.debug("discarding invalid BLE %s=%r for target=%s", key, raw, self._target)
+                return
+        cache = self._ble_status_cache if cache_name == "status" else self._ble_setting_cache
+        cache[key] = value
 
     async def _read_model(self) -> str | None:
         """Read camera model via the official Open GoPro BLE GET_HW_INFO command.
@@ -478,17 +575,41 @@ class WirelessGoProDriver:
                 "preset_group":     int(pg)        if pg       is not None else None,
             }
 
-        encoding    = _unwrap(await asyncio.wait_for(gp.ble_status.encoding.get_value(), BLE_CMD_TIMEOUT))
-        battery     = _unwrap(await asyncio.wait_for(gp.ble_status.internal_battery_percentage.get_value(), BLE_CMD_TIMEOUT))
-        sd_remaining = _unwrap(await asyncio.wait_for(gp.ble_status.remaining_video_time.get_value(), BLE_CMD_TIMEOUT))
+        async def _read_status(attr: Any, timeout: float = BLE_DETAIL_TIMEOUT) -> Any:
+            try:
+                return _unwrap(await asyncio.wait_for(attr.get_value(), timeout))
+            except Exception as exc:
+                log.debug("could not read BLE status for target=%s: %s", self._target, exc)
+                return None
 
-        # Preset group: 1000=video, 1001=photo, 1002=timelapse
-        preset_group: int | None = None
-        try:
-            pg = _unwrap(await asyncio.wait_for(gp.ble_status.preset_group.get_value(), BLE_CMD_TIMEOUT))
-            preset_group = int(pg) if pg is not None else None
-        except Exception:
-            pass  # older firmware may not expose this status
+        encoding = self._cached_encoding()
+        if encoding is None:
+            raw_encoding = await _read_status(gp.ble_status.encoding)
+            encoding = bool(raw_encoding) if raw_encoding is not None else None
+
+        battery, sd_remaining, pg = await asyncio.gather(
+            _read_status(gp.ble_status.internal_battery_percentage),
+            _read_status(gp.ble_status.remaining_video_time),
+            _read_status(gp.ble_status.preset_group),
+        )
+
+        battery = _valid_status_value("battery_percent", battery)
+        sd_remaining = _valid_status_value("sd_remaining_sec", sd_remaining)
+        pg = _valid_status_value("preset_group", pg)
+
+        if battery is not None:
+            self._ble_status_cache["battery_percent"] = battery
+        else:
+            battery = self._ble_status_cache.get("battery_percent")
+        if sd_remaining is not None:
+            self._ble_status_cache["sd_remaining_sec"] = sd_remaining
+        else:
+            sd_remaining = self._ble_status_cache.get("sd_remaining_sec")
+        if pg is not None:
+            self._ble_status_cache["preset_group"] = pg
+        else:
+            pg = self._ble_status_cache.get("preset_group")
+        preset_group = int(pg) if pg is not None else None
 
         return {
             "encoding":      bool(encoding)      if encoding    is not None else None,
@@ -560,14 +681,18 @@ class WirelessGoProDriver:
             try:
                 val = _unwrap(await asyncio.wait_for(
                     getattr(gp.ble_setting, ble_attr).get_value(),
-                    timeout=BLE_CMD_TIMEOUT,
+                    timeout=BLE_DETAIL_TIMEOUT,
                 ))
                 if val is not None:
                     converted = converter(val)
                     if converted is not None:
                         result[key] = converted
+                        self._ble_setting_cache[key] = converted
             except Exception:
                 log.debug("could not read %s for target=%s", ble_attr, self._target)
+
+        for key, value in self._ble_setting_cache.items():
+            result.setdefault(key, value)
 
         return result
 
@@ -609,28 +734,36 @@ class WirelessGoProDriver:
             return result
 
         # ── current values ────────────────────────────────────────────────
+        result.update(self._ble_setting_cache)
+
         try:
             val = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.video_resolution.get_value(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.video_resolution.get_value(), BLE_DETAIL_TIMEOUT,
             ))
             if val is not None:
-                result["resolution"] = _enum_to_resolution(val)
+                converted = _enum_to_resolution(val)
+                if converted is not None:
+                    result["resolution"] = converted
+                    self._ble_setting_cache["resolution"] = converted
         except Exception:
             log.debug("could not read current resolution for %s", self._target)
 
         try:
             val = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.frames_per_second.get_value(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.frames_per_second.get_value(), BLE_DETAIL_TIMEOUT,
             ))
             if val is not None:
-                result["fps"] = _enum_to_fps(val)
+                converted = _enum_to_fps(val)
+                if converted is not None:
+                    result["fps"] = converted
+                    self._ble_setting_cache["fps"] = converted
         except Exception:
             log.debug("could not read current fps for %s", self._target)
 
         # ── capability queries (Open GoPro BLE spec 0x13) ─────────────────
         try:
             caps = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.video_resolution.get_capabilities(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.video_resolution.get_capabilities(), BLE_DETAIL_TIMEOUT,
             ))
             if caps:
                 result["supported_resolutions"] = sorted(
@@ -647,7 +780,7 @@ class WirelessGoProDriver:
 
         try:
             caps = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.frames_per_second.get_capabilities(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.frames_per_second.get_capabilities(), BLE_DETAIL_TIMEOUT,
             ))
             if caps:
                 result["supported_fps"] = sorted(
@@ -665,16 +798,19 @@ class WirelessGoProDriver:
         # ── lens current + capabilities ───────────────────────────────────
         try:
             val = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.video_lens.get_value(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.video_lens.get_value(), BLE_DETAIL_TIMEOUT,
             ))
             if val is not None:
-                result["lens"] = _enum_to_lens(val)
+                converted = _enum_to_lens(val)
+                if converted is not None:
+                    result["lens"] = converted
+                    self._ble_setting_cache["lens"] = converted
         except Exception:
             log.debug("could not read current lens for %s", self._target)
 
         try:
             caps = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.video_lens.get_capabilities(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.video_lens.get_capabilities(), BLE_DETAIL_TIMEOUT,
             ))
             if caps:
                 result["supported_lenses"] = [
@@ -690,16 +826,19 @@ class WirelessGoProDriver:
         # ── hypersmooth current + capabilities ────────────────────────────
         try:
             val = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.hypersmooth.get_value(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.hypersmooth.get_value(), BLE_DETAIL_TIMEOUT,
             ))
             if val is not None:
-                result["hypersmooth"] = _enum_to_hypersmooth(val)
+                converted = _enum_to_hypersmooth(val)
+                if converted is not None:
+                    result["hypersmooth"] = converted
+                    self._ble_setting_cache["hypersmooth"] = converted
         except Exception:
             log.debug("could not read current hypersmooth for %s", self._target)
 
         try:
             caps = _unwrap(await asyncio.wait_for(
-                gp.ble_setting.hypersmooth.get_capabilities(), BLE_CMD_TIMEOUT,
+                gp.ble_setting.hypersmooth.get_capabilities(), BLE_DETAIL_TIMEOUT,
             ))
             if caps:
                 result["supported_hypersmooth"] = [

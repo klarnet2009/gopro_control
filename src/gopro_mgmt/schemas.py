@@ -54,6 +54,10 @@ class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     poll_interval_sec: float = 2.0
     cameras: list[CameraConfig] = Field(default_factory=list)
+    atem_host: str | None = Field(
+        default=None,
+        description="ATEM IP address. If null, auto-discover via mDNS (_blackmagic._tcp.local.).",
+    )
 
 
 class CameraStatus(BaseModel):
@@ -65,6 +69,7 @@ class CameraStatus(BaseModel):
     encoding: bool | None = None
     battery_percent: int | None = None
     sd_remaining_sec: int | None = None
+    rssi_dbm: int | None = None
     last_error: str | None = None
     # Active preset group reported by the camera (1000=video, 1001=photo, 1002=timelapse).
     # None when not connected or camera doesn't expose this status.
@@ -117,5 +122,5 @@ class CommandResult(BaseModel):
 
 
 class WSEvent(BaseModel):
-    type: Literal["status", "command", "hello", "camera_added", "camera_removed", "camera_updated", "scan_result", "cohn_provisioned"]
+    type: Literal["status", "command", "hello", "camera_added", "camera_removed", "camera_updated", "scan_result", "cohn_provisioned", "atem_status", "atem_event"]
     payload: Any

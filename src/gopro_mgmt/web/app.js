@@ -21,6 +21,13 @@ const scanEmpty     = document.getElementById("scan-empty");
 const dialogRescan  = document.getElementById("dialog-rescan");
 const btnScan       = document.getElementById("btn-scan");
 const btnSyncTime   = document.getElementById("btn-sync-time");
+const atemIndicator = document.getElementById("atem-indicator");
+const atemLblEl     = atemIndicator.querySelector(".atem-lbl");
+const atemConnEl    = document.getElementById("atem-conn");
+const atemHostEl    = document.getElementById("atem-host");
+const atemLastEl    = document.getElementById("atem-last");
+const atemEventsEl  = document.getElementById("atem-events");
+const atemAutoBtn   = document.getElementById("atem-auto-btn");
 const btnAdd        = document.getElementById("btn-add");
 const btnRollAll    = document.getElementById("btn-roll-all");
 const btnCutAll     = document.getElementById("btn-cut-all");
@@ -37,11 +44,59 @@ const lastStatus       = new Map(); // id -> previous status (for diffing)
 const recTimers        = new Map(); // id -> interval handle
 const linkTimers       = new Map(); // id -> {t1, t2}
 const autoReconTimers  = new Map(); // id -> setTimeout handle
+let atemEvents = [];
 let dialogMode = "add";
 let nextChannelIdx = 1;
 
 const AUTO_RECONNECT_KEY = id => `auto_reconnect_${id}`;
 const CAM_MODEL_KEY      = id => `cam_model_${id}`;
+const CAM_STATUS_KEY     = id => `cam_status_${id}`;
+
+function cleanTelemetry(key, value) {
+  if (value == null) return null;
+  if (key === "battery_percent") {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+  }
+  if (key === "sd_remaining_sec") {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 && n <= 7 * 24 * 3600 ? n : null;
+  }
+  if (key === "preset_group") {
+    const n = Number(value);
+    return [1000, 1001, 1002].includes(n) ? n : null;
+  }
+  return value;
+}
+
+function hydrateStatus(s) {
+  const prev = lastStatus.get(s.id) || {};
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(CAM_STATUS_KEY(s.id)) || "{}"); }
+  catch { saved = {}; }
+
+  const telemetry = ["battery_percent", "sd_remaining_sec", "preset_group"];
+  const stable = ["resolution", "fps", "lens", "hypersmooth", "model"];
+  const out = { ...s };
+  for (const key of telemetry) {
+    out[key] = cleanTelemetry(key, out[key]);
+    const prevValue = cleanTelemetry(key, prev[key]);
+    if (out[key] == null && prevValue != null) out[key] = prevValue;
+  }
+  for (const key of stable) {
+    if (out[key] == null) out[key] = prev[key] ?? saved[key] ?? out[key];
+  }
+  const snapshot = {};
+  for (const key of stable) {
+    if (out[key] != null) snapshot[key] = out[key];
+  }
+  if (Object.keys(snapshot).length) {
+    localStorage.setItem(CAM_STATUS_KEY(s.id), JSON.stringify(snapshot));
+  } else if (Object.keys(saved).some(key => telemetry.includes(key))) {
+    localStorage.removeItem(CAM_STATUS_KEY(s.id));
+  }
+  return out;
+}
 
 // ─── REST helper ────────────────────────────────────────────────────────
 async function api(method, path, body) {
@@ -78,6 +133,13 @@ function batteryLevel(pct) {
   if (pct < 20) return "crit";
   if (pct < 40) return "low";
   return "ok";
+}
+
+function rssiLevel(rssi) {
+  if (rssi == null || isNaN(rssi)) return "unknown";
+  if (rssi >= -55) return "ok";
+  if (rssi >= -70) return "low";
+  return "crit";
 }
 
 function fmtRecTime(elapsedSec) {
@@ -169,6 +231,7 @@ function resolveTally(s) {
 
 // ─── Render a card ──────────────────────────────────────────────────────
 function renderStatus(s) {
+  s = hydrateStatus(s);
   let entry = cardsById.get(s.id);
   if (!entry) {
     const card = tpl.content.firstElementChild.cloneNode(true);
@@ -295,6 +358,21 @@ function renderStatus(s) {
   } else {
     sdEl.textContent = "—";
     diskBar.style.width = "0%";
+  }
+
+  // BLE signal strength from last scan
+  const rssiEl = card.querySelector(".cam-rssi");
+  const rssiBar = card.querySelector(".cam-rssi-bar");
+  if (s.rssi_dbm != null) {
+    rssiEl.textContent = `${s.rssi_dbm} dBm`;
+    rssiEl.dataset.warn = rssiLevel(s.rssi_dbm);
+    rssiBar.innerHTML = rssiBars(s.rssi_dbm);
+    rssiBar.title = `BLE signal: ${s.rssi_dbm} dBm`;
+  } else {
+    rssiEl.textContent = "—";
+    rssiEl.dataset.warn = "";
+    rssiBar.innerHTML = rssiBars(null);
+    rssiBar.title = "Run BLE scan to update signal";
   }
 
   // Resolution + FPS readout
@@ -615,13 +693,13 @@ async function loadCameraSettings(id, card, entry) {
       }
     }
 
-    populateSel(selRes,  caps.supported_resolutions || [], caps.resolution   || "");
-    populateSel(selFps,  caps.supported_fps         || [], caps.fps          || "");
-    populateSel(selLens, caps.supported_lenses       || [], caps.lens         || "");
-    populateSel(selHs,   caps.supported_hypersmooth  || [], caps.hypersmooth  || "");
+    const s = lastStatus.get(id) || {};
+    populateSel(selRes,  caps.supported_resolutions || [], caps.resolution   || s.resolution   || "");
+    populateSel(selFps,  caps.supported_fps         || [], caps.fps          || s.fps          || "");
+    populateSel(selLens, caps.supported_lenses       || [], caps.lens         || s.lens         || "");
+    populateSel(selHs,   caps.supported_hypersmooth  || [], caps.hypersmooth  || s.hypersmooth  || "");
 
     // Re-apply disabled state
-    const s = lastStatus.get(id);
     const locked = !!(s?.encoding) || s?.connection !== "connected";
     [selRes, selFps, selLens, selHs].forEach(sel => { if (sel) sel.disabled = locked; });
 
@@ -1086,7 +1164,9 @@ async function runScan() {
 
 function rssiBars(rssi) {
   // -30 strong … -90 weak
-  const strength = Math.max(0, Math.min(4, Math.round(((rssi + 90) / 60) * 4)));
+  const strength = rssi == null || isNaN(rssi)
+    ? 0
+    : Math.max(0, Math.min(4, Math.round(((rssi + 90) / 60) * 4)));
   let html = "";
   for (let i = 0; i < 4; i++) {
     html += `<i class="${i < strength ? "on" : ""}"></i>`;
@@ -1146,6 +1226,82 @@ function tickClock() {
 tickClock();
 setInterval(tickClock, 30 * 1000);
 
+// ─── ATEM indicator ─────────────────────────────────────────────────────
+function updateAtemIndicator(payload) {
+  if (!payload || !payload.enabled) return;
+  const auto = payload.auto_enabled !== false;
+  atemAutoBtn.dataset.on = auto ? "true" : "false";
+
+  let state, label;
+  if (!payload.connected) {
+    state = "searching";
+    label = "ATEM";
+  } else if (payload.recording && auto) {
+    state = "recording";
+    label = "ATEM · REC";
+  } else if (payload.connected) {
+    state = "connected";
+    label = "ATEM";
+  }
+  atemIndicator.dataset.state = state;
+  atemLblEl.textContent = label;
+  atemConnEl.textContent = payload.connected
+    ? (payload.recording ? "REC" : "ONLINE")
+    : "SEARCH";
+  atemConnEl.dataset.state = state;
+  const nameStr = payload.name || "ATEM";
+  const hostStr = payload.host ? ` · ${payload.host}` : "";
+  atemIndicator.title = `${nameStr}${hostStr}`;
+  atemHostEl.textContent = payload.host || "auto";
+  if (payload.last_event) atemLastEl.textContent = payload.last_event.message || "—";
+  if (Array.isArray(payload.events)) {
+    atemEvents = payload.events.slice(-12);
+    renderAtemEvents();
+  }
+}
+
+function appendAtemEvent(event) {
+  if (!event) return;
+  atemEvents.push(event);
+  atemEvents = atemEvents.slice(-12);
+  atemLastEl.textContent = event.message || "—";
+  renderAtemEvents();
+}
+
+function renderAtemEvents() {
+  if (!atemEventsEl) return;
+  atemEventsEl.innerHTML = "";
+  const events = [...atemEvents].reverse();
+  if (!events.length) {
+    const li = document.createElement("li");
+    li.dataset.level = "info";
+    li.innerHTML = `<span>--:--:--</span><b>WAIT</b><em>—</em>`;
+    atemEventsEl.appendChild(li);
+    return;
+  }
+  for (const event of events) {
+    const d = event.ts ? new Date(event.ts * 1000) : new Date();
+    const pad = n => String(n).padStart(2, "0");
+    const t = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const li = document.createElement("li");
+    li.dataset.level = event.level || "info";
+    li.innerHTML = `<span>${t}</span><b>${escapeHtml(event.kind || "event")}</b><em>${escapeHtml(event.message || "")}</em>`;
+    atemEventsEl.appendChild(li);
+  }
+}
+
+atemAutoBtn.addEventListener("click", async () => {
+  const next = atemAutoBtn.dataset.on !== "true";
+  atemAutoBtn.dataset.on = next ? "true" : "false";
+  try {
+    const r = await api("POST", "/api/atem/auto", { enabled: next });
+    if (r.data) updateAtemIndicator(r.data);
+  } catch (err) {
+    atemAutoBtn.dataset.on = next ? "false" : "true";
+    toast("error", `ATEM auto: ${err.message}`);
+  }
+});
+
 // ─── WebSocket ──────────────────────────────────────────────────────────
 function setWsState(state) {
   wsIndicator.dataset.state = state;
@@ -1172,6 +1328,12 @@ function connectWS() {
       case "camera_removed":
         if (msg.payload?.id) removeCard(msg.payload.id);
         break;
+      case "atem_status":
+        updateAtemIndicator(msg.payload);
+        break;
+      case "atem_event":
+        appendAtemEvent(msg.payload);
+        break;
     }
   });
   ws.addEventListener("close", () => {
@@ -1189,6 +1351,10 @@ async function loadInitial() {
   } catch (err) {
     toast("error", `Failed to load cameras: ${err.message}`);
   }
+  try {
+    const r = await api("GET", "/api/atem/status");
+    if (r.data) updateAtemIndicator(r.data);
+  } catch { }
   refreshGlobalState();
 }
 

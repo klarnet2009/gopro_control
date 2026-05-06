@@ -237,6 +237,8 @@ def build_router() -> APIRouter:
         except Exception as exc:
             log.exception("BLE scan failed")
             return CommandResult.failure("scan_failed", str(exc))
+        for status in _mgr(request).update_signal_from_scan(results):
+            await _bus(request).broadcast({"type": "status", "payload": status.model_dump()})
         payload = [r.model_dump() for r in results]
         await _bus(request).broadcast({"type": "scan_result", "payload": payload})
         return CommandResult.success(payload)
@@ -441,6 +443,25 @@ def build_router() -> APIRouter:
         except Exception:
             pass
         return CommandResult.success({"id": cam_id, "stopped": True})
+
+    @router.get("/atem/status")
+    async def atem_status(request: Request):
+        """Return the current ATEM connection and recording state."""
+        watcher = getattr(request.app.state, "atem_watcher", None)
+        if watcher is None:
+            return CommandResult.success({"enabled": False})
+        return CommandResult.success({"enabled": True, **watcher.status})
+
+    @router.post("/atem/auto")
+    async def atem_set_auto(request: Request):
+        """Enable or disable ATEM auto-trigger. Body: {"enabled": true|false}"""
+        watcher = getattr(request.app.state, "atem_watcher", None)
+        if watcher is None:
+            raise HTTPException(status_code=404, detail="ATEM watcher not running")
+        body = await request.json()
+        enabled = bool(body.get("enabled", True))
+        watcher.set_auto(enabled)
+        return CommandResult.success({"enabled": True, **watcher.status})
 
     return router
 

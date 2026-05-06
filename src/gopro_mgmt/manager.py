@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .driver import COHN_DB_PATH, CameraDriver, WirelessGoProDriver, default_driver_factory
-from .schemas import CameraConfig, CameraStatus
+from .schemas import CameraConfig, CameraStatus, ScanResult
 
 log = logging.getLogger(__name__)
 
@@ -105,6 +105,19 @@ class CameraManager:
     def export_configs(self) -> list[CameraConfig]:
         return [e.config.model_copy() for e in self._entries.values()]
 
+    def update_signal_from_scan(self, results: list[ScanResult]) -> list[CameraStatus]:
+        """Store latest BLE RSSI for configured cameras, matched by target."""
+        by_target = {r.target.lower(): r for r in results}
+        changed: list[CameraStatus] = []
+        for e in self._entries.values():
+            result = by_target.get(e.config.target.lower())
+            if result is None:
+                continue
+            if e.status.rssi_dbm != result.rssi:
+                e.status.rssi_dbm = result.rssi
+                changed.append(e.status.model_copy())
+        return changed
+
     # --- registry mutations -------------------------------------------------
 
     async def add(self, cfg: CameraConfig) -> CameraStatus:
@@ -188,11 +201,17 @@ class CameraManager:
                 e.status.connection = "connected"
                 e.status.model = drv.get_model()
                 try:
+                    data = await drv.get_status()
+                    for key in ("encoding", "battery_percent", "sd_remaining_sec", "preset_group"):
+                        if key in data and data[key] is not None:
+                            setattr(e.status, key, data[key])
+                except Exception:
+                    log.warning("could not fetch status on connect for %s", cam_id)
+                try:
                     vid = await drv.get_current_video_settings()
-                    e.status.resolution  = vid.get("resolution")
-                    e.status.fps         = vid.get("fps")
-                    e.status.lens        = vid.get("lens")
-                    e.status.hypersmooth = vid.get("hypersmooth")
+                    for key in ("resolution", "fps", "lens", "hypersmooth"):
+                        if key in vid and vid[key] is not None:
+                            setattr(e.status, key, vid[key])
                 except Exception:
                     log.warning("could not fetch video settings on connect for %s", cam_id)
                 log.info(
@@ -375,10 +394,9 @@ class CameraManager:
                 return e.status.model_copy()
             try:
                 data = await e.driver.get_status()
-                e.status.encoding = data.get("encoding")
-                e.status.battery_percent = data.get("battery_percent")
-                e.status.sd_remaining_sec = data.get("sd_remaining_sec")
-                e.status.preset_group = data.get("preset_group")
+                for key in ("encoding", "battery_percent", "sd_remaining_sec", "preset_group"):
+                    if key in data and data[key] is not None:
+                        setattr(e.status, key, data[key])
                 e.status.last_error = None
             except Exception as exc:
                 e.status.last_error = str(exc)
@@ -401,8 +419,30 @@ class CameraManager:
                     e.status.encoding = False
                 e.status.last_error = None
             except (TimeoutError, asyncio.TimeoutError) as exc:
-                # SDK BLE queue locked up — driver is unrecoverable for this
-                # session. Mark as disconnected so the user can re-Connect.
+                # BLE can report the shutter result through async status just
+                # after the command path times out. If the desired recording
+                # state is already visible, keep the session alive instead of
+                # showing a false disconnect while the cameras are recording.
+                if e.driver is not None:
+                    try:
+                        data = await e.driver.get_status()
+                        for key in ("encoding", "battery_percent", "sd_remaining_sec", "preset_group"):
+                            if key in data and data[key] is not None:
+                                setattr(e.status, key, data[key])
+                        if e.status.encoding is on:
+                            e.status.connection = "connected"
+                            e.status.last_error = None
+                            log.warning(
+                                "shutter %s timed out for %s, but camera reached desired state",
+                                "start" if on else "stop",
+                                cam_id,
+                            )
+                            return e.status.model_copy()
+                    except Exception:
+                        log.exception("status check after shutter timeout failed for %s", cam_id)
+
+                # SDK BLE queue locked up and status didn't confirm success —
+                # this session is no longer trustworthy.
                 e.status.last_error = "BLE timed out — reconnect required"
                 e.status.connection = "disconnected"
                 drv = e.driver

@@ -4,6 +4,10 @@ server:
 
 poll_interval_sec: 2
 
+# ATEM integration: auto-discovers via mDNS when atem_host is omitted/null.
+# Set atem_host to skip discovery and connect directly (useful if mDNS is blocked).
+# atem_host: "192.168.1.50"
+
 cameras:
   - id: cam-front
     name: "Front Camera"
