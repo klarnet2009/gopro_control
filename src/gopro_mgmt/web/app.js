@@ -21,6 +21,13 @@ const scanEmpty     = document.getElementById("scan-empty");
 const dialogRescan  = document.getElementById("dialog-rescan");
 const btnScan       = document.getElementById("btn-scan");
 const btnSyncTime   = document.getElementById("btn-sync-time");
+const atemIndicator = document.getElementById("atem-indicator");
+const atemLblEl     = atemIndicator.querySelector(".atem-lbl");
+const atemConnEl    = document.getElementById("atem-conn");
+const atemHostEl    = document.getElementById("atem-host");
+const atemLastEl    = document.getElementById("atem-last");
+const atemEventsEl  = document.getElementById("atem-events");
+const atemAutoBtn   = document.getElementById("atem-auto-btn");
 const btnAdd        = document.getElementById("btn-add");
 const btnRollAll    = document.getElementById("btn-roll-all");
 const btnCutAll     = document.getElementById("btn-cut-all");
@@ -37,6 +44,7 @@ const lastStatus       = new Map(); // id -> previous status (for diffing)
 const recTimers        = new Map(); // id -> interval handle
 const linkTimers       = new Map(); // id -> {t1, t2}
 const autoReconTimers  = new Map(); // id -> setTimeout handle
+let atemEvents = [];
 let dialogMode = "add";
 let nextChannelIdx = 1;
 
@@ -1196,6 +1204,82 @@ function tickClock() {
 tickClock();
 setInterval(tickClock, 30 * 1000);
 
+// ─── ATEM indicator ─────────────────────────────────────────────────────
+function updateAtemIndicator(payload) {
+  if (!payload || !payload.enabled) return;
+  const auto = payload.auto_enabled !== false;
+  atemAutoBtn.dataset.on = auto ? "true" : "false";
+
+  let state, label;
+  if (!payload.connected) {
+    state = "searching";
+    label = "ATEM";
+  } else if (payload.recording && auto) {
+    state = "recording";
+    label = "ATEM · REC";
+  } else if (payload.connected) {
+    state = "connected";
+    label = "ATEM";
+  }
+  atemIndicator.dataset.state = state;
+  atemLblEl.textContent = label;
+  atemConnEl.textContent = payload.connected
+    ? (payload.recording ? "REC" : "ONLINE")
+    : "SEARCH";
+  atemConnEl.dataset.state = state;
+  const nameStr = payload.name || "ATEM";
+  const hostStr = payload.host ? ` · ${payload.host}` : "";
+  atemIndicator.title = `${nameStr}${hostStr}`;
+  atemHostEl.textContent = payload.host || "auto";
+  if (payload.last_event) atemLastEl.textContent = payload.last_event.message || "—";
+  if (Array.isArray(payload.events)) {
+    atemEvents = payload.events.slice(-12);
+    renderAtemEvents();
+  }
+}
+
+function appendAtemEvent(event) {
+  if (!event) return;
+  atemEvents.push(event);
+  atemEvents = atemEvents.slice(-12);
+  atemLastEl.textContent = event.message || "—";
+  renderAtemEvents();
+}
+
+function renderAtemEvents() {
+  if (!atemEventsEl) return;
+  atemEventsEl.innerHTML = "";
+  const events = [...atemEvents].reverse();
+  if (!events.length) {
+    const li = document.createElement("li");
+    li.dataset.level = "info";
+    li.innerHTML = `<span>--:--:--</span><b>WAIT</b><em>—</em>`;
+    atemEventsEl.appendChild(li);
+    return;
+  }
+  for (const event of events) {
+    const d = event.ts ? new Date(event.ts * 1000) : new Date();
+    const pad = n => String(n).padStart(2, "0");
+    const t = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    const li = document.createElement("li");
+    li.dataset.level = event.level || "info";
+    li.innerHTML = `<span>${t}</span><b>${escapeHtml(event.kind || "event")}</b><em>${escapeHtml(event.message || "")}</em>`;
+    atemEventsEl.appendChild(li);
+  }
+}
+
+atemAutoBtn.addEventListener("click", async () => {
+  const next = atemAutoBtn.dataset.on !== "true";
+  atemAutoBtn.dataset.on = next ? "true" : "false";
+  try {
+    const r = await api("POST", "/api/atem/auto", { enabled: next });
+    if (r.data) updateAtemIndicator(r.data);
+  } catch (err) {
+    atemAutoBtn.dataset.on = next ? "false" : "true";
+    toast("error", `ATEM auto: ${err.message}`);
+  }
+});
+
 // ─── WebSocket ──────────────────────────────────────────────────────────
 function setWsState(state) {
   wsIndicator.dataset.state = state;
@@ -1222,6 +1306,12 @@ function connectWS() {
       case "camera_removed":
         if (msg.payload?.id) removeCard(msg.payload.id);
         break;
+      case "atem_status":
+        updateAtemIndicator(msg.payload);
+        break;
+      case "atem_event":
+        appendAtemEvent(msg.payload);
+        break;
     }
   });
   ws.addEventListener("close", () => {
@@ -1239,6 +1329,10 @@ async function loadInitial() {
   } catch (err) {
     toast("error", `Failed to load cameras: ${err.message}`);
   }
+  try {
+    const r = await api("GET", "/api/atem/status");
+    if (r.data) updateAtemIndicator(r.data);
+  } catch { }
   refreshGlobalState();
 }
 

@@ -54,6 +54,10 @@ class AppConfig(BaseModel):
     server: ServerConfig = ServerConfig()
     poll_interval_sec: float = 2.0
     cameras: list[CameraConfig] = Field(default_factory=list)
+    atem_host: str | None = Field(
+        default=None,
+        description="ATEM IP address. If null, auto-discover via mDNS (_blackmagic._tcp.local.).",
+    )
 
 
 class CameraStatus(BaseModel):
