@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GoPro · Roll Call</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+
+  <header class="top-rail">
+    <div class="rail-left">
+      <span class="rail-mark">◯</span>
+      <h1 class="rail-title">Roll Call</h1>
+      <span class="rail-sub">GOPRO MASTER CONTROL · v0.1</span>
+    </div>
+    <div class="rail-center">
+      <span id="rail-live" class="rail-live" data-state="idle">
+        <span class="dot"></span>
+        <span class="rail-live-label">STANDBY</span>
+      </span>
+    </div>
+    <div class="rail-right">
+      <span id="ws-indicator" class="ws-state" data-state="connecting" title="Server connection">
+        <span class="ws-dot"></span><span class="ws-label">linking…</span>
+      </span>
+      <span id="rail-clock" class="rail-clock">--:--</span>
+    </div>
+  </header>
+  <div class="rail-rule" aria-hidden="true">
+    <span></span><span></span><span></span><span></span>
+  </div>
+
+  <main class="stage">
+    <section id="empty-hint" class="empty hidden">
+      <p class="empty-eyebrow">SIGNAL</p>
+      <h2 class="empty-title">No channels patched</h2>
+      <p class="empty-body">Add your first GoPro by serial last-4, or scan for cameras nearby.</p>
+      <div class="empty-actions">
+        <button id="empty-add" class="btn-brass">+ Add manually</button>
+        <button id="empty-scan" class="btn-ghost">◷ Scan nearby</button>
+      </div>
+    </section>
+
+    <section id="cameras" class="grid"></section>
+  </main>
+
+  <template id="camera-card-template">
+    <article class="strip" data-id="" style="--i:0">
+      <span class="screw screw-tl" aria-hidden="true"></span>
+      <span class="screw screw-tr" aria-hidden="true"></span>
+      <span class="screw screw-bl" aria-hidden="true"></span>
+      <span class="screw screw-br" aria-hidden="true"></span>
+
+      <header class="strip-head">
+        <span class="ch-tag">CH&nbsp;<span class="ch-num">--</span></span>
+        <div class="strip-actions">
+          <button class="icon-btn btn-provision" title="Provision COHN" aria-label="Provision COHN" hidden>&#9881;</button>
+          <button class="icon-btn btn-edit" title="Edit channel" aria-label="Edit">&#9998;</button>
+          <button class="icon-btn btn-remove" title="Remove channel" aria-label="Remove">&times;</button>
+        </div>
+      </header>
+
+      <div class="strip-name">
+        <span class="led" data-state="offline" aria-hidden="true"></span>
+        <h2 class="cam-name">Camera</h2>
+      </div>
+      <p class="strip-meta">
+        <span class="cam-target">#----</span>
+        <span class="cam-model-sep dot-sep" hidden>·</span>
+        <span class="cam-model"></span>
+        <span class="dot-sep">·</span>
+        <span class="cam-mode badge-mode" data-mode="ble" tabindex="0">BLE</span>
+      </p>
+
+      <div class="tally" data-state="offline">
+        <span class="tally-light" aria-hidden="true"></span>
+        <span class="tally-label">OFFLINE</span>
+        <span class="tally-timer">--:--</span>
+      </div>
+
+      <div class="readouts">
+        <div class="readout">
+          <span class="readout-label">BATT</span>
+          <span class="bar battery-bar" data-level="ok" aria-label="battery level">
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </span>
+          <span class="readout-value cam-batt">—</span>
+        </div>
+        <div class="readout">
+          <span class="readout-label">DISK</span>
+          <span class="bar disk-bar"><i style="width:0%"></i></span>
+          <span class="readout-value cam-sd">—</span>
+        </div>
+        <div class="readout cam-res-row hidden">
+          <span class="readout-label">RES</span>
+          <span class="readout-value readout-wide cam-res-val">—</span>
+        </div>
+        <div class="readout cam-lens-row hidden">
+          <span class="readout-label">LENS</span>
+          <span class="readout-value readout-wide cam-lens-val">—</span>
+        </div>
+        <div class="readout cam-hs-row hidden">
+          <span class="readout-label">STAB</span>
+          <span class="readout-value readout-wide cam-hs-val">—</span>
+        </div>
+      </div>
+
+      <div class="settings-panel">
+        <div class="mode-row">
+          <span class="readout-label">MODE</span>
+          <div class="mode-btns">
+            <button class="btn-mode" data-mode="1000" disabled>VIDEO</button>
+            <button class="btn-mode" data-mode="1001" disabled>PHOTO</button>
+            <button class="btn-mode" data-mode="1002" disabled>LAPSE</button>
+          </div>
+          <span class="mode-status" aria-live="polite"></span>
+        </div>
+        <div class="vid-settings">
+          <div class="settings-field">
+            <span class="readout-label">RES</span>
+            <select class="cam-res-sel" disabled title="Connect camera to change settings"><option value="">—</option></select>
+          </div>
+          <div class="settings-field">
+            <span class="readout-label">FPS</span>
+            <select class="cam-fps-sel" disabled title="Connect camera to change settings"><option value="">—</option></select>
+          </div>
+          <div class="settings-field">
+            <span class="readout-label">LENS</span>
+            <select class="cam-lens-sel" disabled title="Connect camera to change settings"><option value="">—</option></select>
+          </div>
+          <div class="settings-field">
+            <span class="readout-label">STAB</span>
+            <select class="cam-hs-sel" disabled title="Connect camera to change settings"><option value="">—</option></select>
+          </div>
+          <span class="settings-status" aria-live="polite"></span>
+        </div>
+      </div>
+
+      <div class="error-block hidden">
+        <p class="error-head">⚠ <span>ERROR</span></p>
+        <p class="error-msg cam-err"></p>
+        <div class="error-actions">
+          <button class="btn-ghost btn-dismiss">Dismiss</button>
+          <button class="btn-amber btn-recover">⟲ Reconnect</button>
+        </div>
+      </div>
+
+      <div class="preview-panel hidden">
+        <div class="preview-head">
+          <span class="readout-label">PREVIEW</span>
+          <button class="icon-btn btn-preview-stop" title="Stop preview" aria-label="Stop preview">&times;</button>
+        </div>
+        <img class="preview-img" alt="Live preview" />
+      </div>
+
+      <footer class="strip-foot">
+        <button class="btn-link">LINK</button>
+        <button class="btn-roll">ROLL</button>
+        <label class="auto-wrap" title="Auto-reconnect when connection drops unexpectedly">
+          <input type="checkbox" class="cam-auto-reconnect" />
+          <span class="auto-label">AUTO</span>
+        </label>
+        <button class="btn-preview" hidden>PREVIEW</button>
+      </footer>
+    </article>
+  </template>
+
+  <footer class="bus" id="bus">
+    <div class="bus-counts">
+      <span class="bus-count">
+        <span class="bus-count-num" id="count-armed">0</span>
+        <span class="bus-count-label">of <span id="count-total">0</span> armed</span>
+      </span>
+      <span class="bus-sep" aria-hidden="true">·</span>
+      <span class="bus-count">
+        <span class="bus-count-num bus-rolling" id="count-rolling">0</span>
+        <span class="bus-count-label">rolling</span>
+      </span>
+      <p id="bus-hint" class="bus-hint hidden">Connect a camera to roll.</p>
+    </div>
+    <div class="bus-cta">
+      <button id="btn-roll-all" class="bus-btn bus-btn-roll" disabled>
+        <span>▶</span> ROLL ALL
+      </button>
+      <button id="btn-cut-all" class="bus-btn bus-btn-cut" disabled>
+        <span>■</span> CUT ALL
+      </button>
+    </div>
+    <div class="bus-side">
+      <button id="btn-add" class="btn-brass btn-brass-sm">+ Add</button>
+      <button id="btn-sync-time" class="btn-ghost btn-sync-time" title="Sync clocks on all connected cameras to server time" disabled>
+        <span class="sync-time-icon">⏱</span> Sync Clocks
+      </button>
+      <button id="btn-scan" class="btn-ghost btn-scan">
+        <span class="scan-icon">◷</span><span class="scan-label">Scan BLE</span>
+      </button>
+    </div>
+  </footer>
+
+  <dialog id="camera-dialog" class="dialog">
+    <form method="dialog" id="camera-form">
+      <header class="dialog-head">
+        <p class="dialog-eyebrow" id="dialog-eyebrow">PATCH NEW CHANNEL</p>
+        <h3 id="dialog-title">Add Camera</h3>
+      </header>
+
+      <section id="scan-section" class="scan-section hidden">
+        <div class="scan-header">
+          <span class="scan-section-label">Discovered nearby</span>
+          <button type="button" id="dialog-rescan" class="btn-ghost btn-tiny">Rescan</button>
+        </div>
+        <ul id="scan-list" class="scan-list"></ul>
+        <p id="scan-empty" class="scan-empty hidden">No GoPro cameras found nearby.</p>
+      </section>
+
+      <label class="field">
+        <span class="field-label">ID</span>
+        <input name="id" required pattern="[a-z0-9][a-z0-9\-]{0,30}" placeholder="cam-front" autocomplete="off" />
+        <small class="field-hint">lowercase letters, digits, dashes — max 31</small>
+      </label>
+      <label class="field">
+        <span class="field-label">Name</span>
+        <input name="name" required maxlength="60" placeholder="Front Camera" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="field-label">Target <small>(last 4 of serial)</small></span>
+        <input name="target" required pattern="[A-Za-z0-9]{4}" maxlength="4" placeholder="A1B2" autocomplete="off" />
+      </label>
+
+      <fieldset class="field mode-pick">
+        <legend class="field-label">Transport</legend>
+        <label class="mode-opt">
+          <input type="radio" name="mode" value="ble" checked />
+          <span><b>BLE</b><small>fast, sufficient for start/stop</small></span>
+        </label>
+        <label class="mode-opt">
+          <input type="radio" name="mode" value="cohn" />
+          <span><b>COHN</b><small>HTTP over home Wi-Fi · clock sync · live preview</small></span>
+        </label>
+      </fieldset>
+
+      <p id="dialog-warn" class="dialog-warn hidden"></p>
+      <p id="dialog-error" class="dialog-error hidden"></p>
+
+      <footer class="dialog-actions">
+        <button type="button" id="dialog-cancel" class="btn-ghost">Cancel</button>
+        <button type="submit" class="btn-brass" id="dialog-save">Save</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog id="provision-dialog" class="dialog">
+    <form method="dialog" id="provision-form">
+      <header class="dialog-head">
+        <p class="dialog-eyebrow">FIRST-TIME COHN SETUP</p>
+        <h3>Provision <span id="provision-name">Camera</span></h3>
+      </header>
+      <p class="dialog-warn">
+        The camera will join the Wi-Fi network you specify and reboot. This takes 20–40 seconds.
+      </p>
+      <label class="field">
+        <span class="field-label">Wi-Fi SSID</span>
+        <input name="ssid" required maxlength="32" autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="field-label">Wi-Fi Password</span>
+        <input name="password" type="password" required minlength="8" maxlength="63" autocomplete="off" />
+        <small class="field-hint">8–63 characters, WPA2/3 PSK.</small>
+      </label>
+      <p id="provision-error" class="dialog-error hidden"></p>
+      <footer class="dialog-actions">
+        <button type="button" id="provision-cancel" class="btn-ghost">Cancel</button>
+        <button type="submit" class="btn-brass" id="provision-submit">Provision</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
