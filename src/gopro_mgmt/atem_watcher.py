@@ -267,10 +267,8 @@ class AtemWatcher:
             self._record_event("command", "ROLL ALL scheduled", level="rec")
             self._schedule(self._manager.start_all())
         elif previous is True:
-            log.warning(
-                "ATEM stop trigger ignored; auto-stop is disabled to avoid false cuts from transient recorder status"
-            )
-            self._record_event("command", "CUT ALL ignored (auto-stop disabled)", level="warn")
+            self._record_event("command", f"CUT ALL scheduled (confirm in {_FALSE_STOP_CONFIRM_SEC}s)", level="warn")
+            self._schedule(self._confirmed_stop_all())
 
     async def _confirmed_stop_all(self) -> None:
         # Do not immediately stop GoPros on a single false sample. The ATEM UDP
