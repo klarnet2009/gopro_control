@@ -189,6 +189,7 @@ class CameraDriver(Protocol):
     async def start_recording(self) -> None: ...
     async def stop_recording(self) -> None: ...
     async def get_status(self) -> dict[str, Any]: ...
+    async def get_rssi(self) -> int | None: ...
     async def get_current_video_settings(self) -> dict[str, Any]: ...
     async def get_video_capabilities(self) -> dict[str, Any]: ...
     async def set_video_settings(
@@ -617,6 +618,29 @@ class WirelessGoProDriver:
             "sd_remaining_sec": int(sd_remaining) if sd_remaining is not None else None,
             "preset_group":  preset_group,
         }
+
+    async def get_rssi(self) -> int | None:
+        """Return BLE RSSI in dBm for the connected device, or None if unavailable.
+
+        COHN mode has no BLE connection, so always returns None.
+        On BLE/BLE+WiFi: WirelessGoPro._ble is GoProBle (communicator_interface.py),
+        which holds a BleClient at _ble._handle (bleak.BleakClient). On macOS/
+        CoreBluetooth, BleakClient.get_rssi() issues a readRSSI() request.
+        """
+        if self._gopro is None or self._mode == "cohn":
+            return None
+        try:
+            # open_gopro path: WirelessGoPro._ble (GoProBle) → ._ble (BleClient) → ._handle (BleakClient)
+            ble_communicator = getattr(self._gopro, "_ble", None)
+            ble_client = getattr(ble_communicator, "_ble", None)
+            handle = getattr(ble_client, "_handle", None)
+            if handle is not None and hasattr(handle, "get_rssi"):
+                rssi = await asyncio.wait_for(handle.get_rssi(), timeout=3.0)
+                if isinstance(rssi, (int, float)):
+                    return int(rssi)
+        except Exception as exc:
+            log.debug("get_rssi failed for target=%s: %s", self._target, exc)
+        return None
 
     async def get_current_video_settings(self) -> dict[str, Any]:
         """Read current resolution, fps, lens, and hypersmooth.

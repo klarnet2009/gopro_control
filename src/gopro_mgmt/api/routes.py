@@ -194,12 +194,24 @@ def build_router() -> APIRouter:
     @router.post("/cameras/{cam_id}/record/stop")
     async def stop_one(cam_id: str, request: Request):
         try:
-            status = await _mgr(request).stop(cam_id)
-            await _bus(request).broadcast({"type": "status", "payload": status.model_dump()})
+            mgr = _mgr(request)
+            bus = _bus(request)
+            # Optimistic update: tell all clients the camera stopped immediately.
+            # The actual BLE/HTTP command can take 5-10s while GoPro finalises
+            # the file on SD — the real confirmed state follows once it completes.
+            cur = mgr.get_status(cam_id)
+            await bus.broadcast({"type": "status", "payload": cur.model_copy(update={"encoding": False}).model_dump()})
+            status = await mgr.stop(cam_id)
+            await bus.broadcast({"type": "status", "payload": status.model_dump()})
             return CommandResult.success(status.model_dump())
         except CameraNotFound:
             raise HTTPException(status_code=404, detail=f"unknown camera: {cam_id}")
         except Exception as exc:
+            # Restore accurate state so the UI reflects what actually happened.
+            try:
+                await _bus(request).broadcast({"type": "status", "payload": _mgr(request).get_status(cam_id).model_dump()})
+            except Exception:
+                pass
             return CommandResult.failure("stop_failed", str(exc))
 
     @router.post("/cameras/record/start")
@@ -212,10 +224,16 @@ def build_router() -> APIRouter:
 
     @router.post("/cameras/record/stop")
     async def stop_all(request: Request):
-        statuses = await _mgr(request).stop_all()
+        mgr = _mgr(request)
+        bus = _bus(request)
+        # Optimistic broadcast for every recording camera before the slow BLE/HTTP stop
+        for s in mgr.list_status():
+            if s.encoding:
+                await bus.broadcast({"type": "status", "payload": s.model_copy(update={"encoding": False}).model_dump()})
+        statuses = await mgr.stop_all()
         payload = [s.model_dump() for s in statuses]
         for s in payload:
-            await _bus(request).broadcast({"type": "status", "payload": s})
+            await bus.broadcast({"type": "status", "payload": s})
         return CommandResult.success(payload)
 
     @router.get("/wifi-ssid")

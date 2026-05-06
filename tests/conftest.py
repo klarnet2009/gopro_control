@@ -87,6 +87,9 @@ class FakeDriver:
             "sd_remaining_sec": self.sd_remaining,
         }
 
+    async def get_rssi(self) -> int | None:
+        return None
+
     async def sync_time(self) -> None:
         return None
 

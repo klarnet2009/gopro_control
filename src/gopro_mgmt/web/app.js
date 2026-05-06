@@ -309,7 +309,7 @@ function renderStatus(s) {
 
   // Tally
   const tally = card.querySelector(".tally");
-  const tallyState = resolveTally(s);
+  const tallyState = entry.stopping ? { state: "stopping", label: "STOPPING" } : resolveTally(s);
   tally.dataset.state = tallyState.state;
   tally.querySelector(".tally-label").textContent = tallyState.label;
 
@@ -360,10 +360,12 @@ function renderStatus(s) {
     diskBar.style.width = "0%";
   }
 
-  // BLE signal strength from last scan
-  const rssiEl = card.querySelector(".cam-rssi");
+  // BLE signal strength
+  const sigRow  = card.querySelector(".cam-sig-row");
+  const rssiEl  = card.querySelector(".cam-rssi");
   const rssiBar = card.querySelector(".cam-rssi-bar");
-  if (s.rssi_dbm != null) {
+  sigRow.dataset.stale = (s.rssi_dbm != null && s.connection !== "connected") ? "true" : "false";
+  if (s.rssi_dbm != null && s.mode !== "cohn") {
     rssiEl.textContent = `${s.rssi_dbm} dBm`;
     rssiEl.dataset.warn = rssiLevel(s.rssi_dbm);
     rssiBar.innerHTML = rssiBars(s.rssi_dbm);
@@ -372,8 +374,9 @@ function renderStatus(s) {
     rssiEl.textContent = "—";
     rssiEl.dataset.warn = "";
     rssiBar.innerHTML = rssiBars(null);
-    rssiBar.title = "Run BLE scan to update signal";
+    rssiBar.title = "";
   }
+  sigRow.hidden = s.mode === "cohn";
 
   // Resolution + FPS readout
   const resRow = card.querySelector(".cam-res-row");
@@ -639,12 +642,31 @@ async function onLinkPress(entry) {
 async function onRollPress(entry) {
   const id = entry.card.dataset.id;
   const s  = lastStatus.get(id);
-  const path = s?.encoding ? `/api/cameras/${id}/record/stop` : `/api/cameras/${id}/record/start`;
+  const stopping = s?.encoding === true;
+  const path = stopping ? `/api/cameras/${id}/record/stop` : `/api/cameras/${id}/record/start`;
+
+  if (stopping) {
+    entry.stopping = true;
+    renderStatus({ ...s, encoding: false });
+  }
+
+  let stopOk = false;
   try {
     const r = await api("POST", path);
     if (r?.error) toast("error", r.error.message);
+    else stopOk = true;
   } catch (err) {
     toast("error", err.message);
+  } finally {
+    if (stopping) {
+      entry.stopping = false;
+      const latest = lastStatus.get(id);
+      if (latest) {
+        // If stop succeeded, force encoding=false — lastStatus may still carry a
+        // stale encoding=true from a poller update that arrived mid-flight.
+        renderStatus(stopOk ? { ...latest, encoding: false } : latest);
+      }
+    }
   }
 }
 

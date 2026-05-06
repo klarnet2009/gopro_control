@@ -3,13 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .driver import COHN_DB_PATH, CameraDriver, WirelessGoProDriver, default_driver_factory
 from .schemas import CameraConfig, CameraStatus, ScanResult
 
 log = logging.getLogger(__name__)
+
+RSSI_POLL_INTERVAL = 15.0  # seconds between BLE RSSI reads
 
 DriverFactory = Callable[[CameraConfig], CameraDriver]
 
@@ -53,6 +56,13 @@ class _Entry:
     status: CameraStatus
     driver: CameraDriver | None
     lock: asyncio.Lock
+    rssi_updated_at: float = field(default=0.0)
+    # Monotonic timestamp of the last confirmed stop. Poller ignores encoding=True
+    # from the camera for STOP_GRACE seconds after this (camera still finalises file).
+    stop_confirmed_at: float = field(default=0.0)
+
+
+STOP_GRACE = 8.0  # seconds to suppress spurious encoding=True after a stop ACK
 
 
 class CameraNotFound(KeyError):
@@ -184,6 +194,7 @@ class CameraManager:
                     log.exception("close failed for %s", cam_id)
             e.status.connection = "disconnected"
             e.status.encoding = None
+            # Keep last known rssi so the card shows it while offline
 
     # --- lifecycle -----------------------------------------------------------
 
@@ -238,6 +249,7 @@ class CameraManager:
                     log.exception("close failed for %s", cam_id)
             e.status.connection = "disconnected"
             e.status.encoding = None
+            # Keep last known rssi so the card shows it while offline
             return e.status.model_copy()
 
     async def shutdown(self) -> None:
@@ -394,13 +406,24 @@ class CameraManager:
                 return e.status.model_copy()
             try:
                 data = await e.driver.get_status()
-                for key in ("encoding", "battery_percent", "sd_remaining_sec", "preset_group"):
+                encoding = data.get("encoding")
+                # Suppress spurious encoding=True while GoPro finalises the file
+                if encoding and (time.monotonic() - e.stop_confirmed_at < STOP_GRACE):
+                    encoding = False
+                e.status.encoding = encoding
+                for key in ("battery_percent", "sd_remaining_sec", "preset_group"):
                     if key in data and data[key] is not None:
                         setattr(e.status, key, data[key])
                 e.status.last_error = None
             except Exception as exc:
                 e.status.last_error = str(exc)
                 log.warning("status refresh failed for %s: %s", cam_id, exc)
+            if time.monotonic() - e.rssi_updated_at >= RSSI_POLL_INTERVAL:
+                try:
+                    e.status.rssi_dbm = await e.driver.get_rssi()
+                    e.rssi_updated_at = time.monotonic()
+                except Exception as exc:
+                    log.debug("rssi refresh failed for %s: %s", cam_id, exc)
             return e.status.model_copy()
 
     # --- internals -----------------------------------------------------------
@@ -417,6 +440,7 @@ class CameraManager:
                 else:
                     await e.driver.stop_recording()
                     e.status.encoding = False
+                    e.stop_confirmed_at = time.monotonic()
                 e.status.last_error = None
             except (TimeoutError, asyncio.TimeoutError) as exc:
                 # BLE can report the shutter result through async status just

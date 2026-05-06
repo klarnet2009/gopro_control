@@ -632,6 +632,17 @@ body {
 }
 .tally[data-state="connecting"] .tally-label { color: var(--warn); }
 
+.tally[data-state="stopping"] {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+}
+.tally[data-state="stopping"] .tally-light {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-soft);
+  animation: pulse 2s ease-in-out infinite;
+}
+.tally[data-state="stopping"] .tally-label { color: var(--warn); }
+
 .tally[data-state="error"] {
   background: var(--err-soft);
   border-color: var(--err-line);
@@ -743,6 +754,29 @@ body {
 .cam-rssi-bar i:nth-child(3) { height: 10px; }
 .cam-rssi-bar i:nth-child(4) { height: 13px; }
 .cam-rssi-bar i.on { background: var(--ok); }
+
+/* signal — 4 ascending bars (BLE RSSI) */
+.signal-bar {
+  height: 14px;
+  align-items: flex-end;
+  gap: 3px;
+}
+.signal-bar i {
+  flex: none;
+  width: 6px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 1.5px;
+  transition: background 240ms ease;
+}
+.signal-bar i:nth-child(1) { height: 4px; }
+.signal-bar i:nth-child(2) { height: 7px; }
+.signal-bar i:nth-child(3) { height: 10px; }
+.signal-bar i:nth-child(4) { height: 13px; }
+.signal-bar[data-level="ok"]   i.on { background: var(--ok); }
+.signal-bar[data-level="warn"] i.on { background: var(--warn); }
+.signal-bar[data-level="crit"] i.on { background: var(--rec); }
+.signal-bar[data-level="none"] i    { background: rgba(255,255,255,0.07); }
+.cam-sig-row[data-stale="true"]     { opacity: 0.45; }
 
 /* ========================== SETTINGS PANEL ======================== */
 
