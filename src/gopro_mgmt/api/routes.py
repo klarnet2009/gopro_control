@@ -462,6 +462,8 @@ def build_router() -> APIRouter:
             pass
         return CommandResult.success({"id": cam_id, "stopped": True})
 
+    # ── ATEM status + auto-trigger toggle ─────────────────────────────────
+
     @router.get("/atem/status")
     async def atem_status(request: Request):
         """Return the current ATEM connection and recording state."""

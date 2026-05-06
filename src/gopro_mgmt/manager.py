@@ -60,9 +60,12 @@ class _Entry:
     # Monotonic timestamp of the last confirmed stop. Poller ignores encoding=True
     # from the camera for STOP_GRACE seconds after this (camera still finalises file).
     stop_confirmed_at: float = field(default=0.0)
+    # Earliest time a start command may be sent after a stop ACK.
+    min_start_at: float = field(default=0.0)
 
 
 STOP_GRACE = 8.0  # seconds to suppress spurious encoding=True after a stop ACK
+POST_STOP_RECOVERY_SEC = 4.0  # min gap between stop-ACK and next start
 
 
 class CameraNotFound(KeyError):
@@ -194,6 +197,7 @@ class CameraManager:
                     log.exception("close failed for %s", cam_id)
             e.status.connection = "disconnected"
             e.status.encoding = None
+            e.min_start_at = 0.0
             # Keep last known rssi so the card shows it while offline
 
     # --- lifecycle -----------------------------------------------------------
@@ -249,6 +253,7 @@ class CameraManager:
                     log.exception("close failed for %s", cam_id)
             e.status.connection = "disconnected"
             e.status.encoding = None
+            e.min_start_at = 0.0
             # Keep last known rssi so the card shows it while offline
             return e.status.model_copy()
 
@@ -430,9 +435,29 @@ class CameraManager:
 
     async def _shutter(self, cam_id: str, *, on: bool) -> CameraStatus:
         e = self._entry(cam_id)
+
+        # Sleep BEFORE the lock for start commands so refresh_status can still
+        # acquire the lock and serve status while we wait out the recovery window.
+        if on:
+            delay = e.min_start_at - time.monotonic()
+            if delay > 0:
+                log.debug(
+                    "delaying start for %s by %.2fs (post-stop recovery)",
+                    cam_id, delay,
+                )
+                await asyncio.sleep(delay)
+
         async with e.lock:
             if e.driver is None:
                 raise RuntimeError(f"camera {cam_id} is not connected")
+
+            # De-dup: if concurrent callers raced through the wait, only the
+            # first one should actually send the BLE command.
+            if on and e.status.encoding is True:
+                return e.status.model_copy()
+            if not on and e.status.encoding is False:
+                return e.status.model_copy()
+
             try:
                 if on:
                     await e.driver.start_recording()
@@ -440,7 +465,9 @@ class CameraManager:
                 else:
                     await e.driver.stop_recording()
                     e.status.encoding = False
-                    e.stop_confirmed_at = time.monotonic()
+                    now = time.monotonic()
+                    e.stop_confirmed_at = now
+                    e.min_start_at = now + POST_STOP_RECOVERY_SEC
                 e.status.last_error = None
             except (TimeoutError, asyncio.TimeoutError) as exc:
                 # BLE can report the shutter result through async status just
@@ -476,7 +503,10 @@ class CameraManager:
                         await drv.close()
                     except Exception:
                         log.exception("close after timeout failed for %s", cam_id)
-                log.error("shutter %s timed out for %s — auto-disconnected", "start" if on else "stop", cam_id)
+                log.error(
+                    "shutter %s timed out for %s — auto-disconnected",
+                    "start" if on else "stop", cam_id,
+                )
                 raise RuntimeError("BLE command timed out; camera auto-disconnected") from exc
             except Exception as exc:
                 e.status.last_error = str(exc)

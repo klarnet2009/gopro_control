@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
-from gopro_mgmt.manager import CameraAlreadyExists, CameraManager, CameraNotFound
+from gopro_mgmt.manager import CameraAlreadyExists, CameraManager, CameraNotFound, POST_STOP_RECOVERY_SEC
 from gopro_mgmt.schemas import CameraConfig
 from tests.conftest import FakeDriver
 
@@ -259,3 +262,89 @@ async def test_provision_cohn_blocked_when_connected(manager, _patch_provision_d
     await manager.connect("cam-a")
     with pytest.raises(RuntimeError, match="must be disconnected"):
         await manager.provision_cohn("cam-a", "MyWifi", "longerthan8")
+
+
+# ---- Post-stop recovery delay -----------------------------------------------
+
+
+async def test_start_after_stop_sets_min_start_at(manager: CameraManager):
+    """After a stop ACK, min_start_at is set POST_STOP_RECOVERY_SEC into the future."""
+    await manager.connect("cam-a")
+    await manager.start("cam-a")
+    before = time.monotonic()
+    await manager.stop("cam-a")
+    entry = manager._entry("cam-a")
+    assert entry.min_start_at >= before + POST_STOP_RECOVERY_SEC - 0.1
+
+
+async def test_start_before_recovery_window_sleeps(manager: CameraManager, monkeypatch):
+    """If min_start_at is in the future, _shutter sleeps with a positive delay."""
+    positive_sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        if delay > 0:
+            positive_sleeps.append(delay)
+
+    # Connect first (FakeDriver.open calls sleep(0) which we don't count)
+    await manager.connect("cam-a")
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    manager._entry("cam-a").min_start_at = time.monotonic() + 2.0
+    await manager.start("cam-a")
+
+    assert len(positive_sleeps) == 1
+    assert positive_sleeps[0] > 0
+
+
+async def test_start_after_recovery_window_is_immediate(manager: CameraManager, monkeypatch):
+    """If min_start_at is in the past, no positive sleep is performed."""
+    positive_sleeps: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        if delay > 0:
+            positive_sleeps.append(delay)
+
+    await manager.connect("cam-a")
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    manager._entry("cam-a").min_start_at = time.monotonic() - 1.0
+    await manager.start("cam-a")
+
+    assert positive_sleeps == []
+
+
+async def test_dedup_concurrent_starts_fire_once(manager: CameraManager, monkeypatch):
+    """Concurrent start calls during recovery window only send one BLE command."""
+    await manager.connect("cam-a")
+    await manager.start("cam-a")
+    await manager.stop("cam-a")
+
+    drv = FakeDriver.instances[0]
+    initial_start_count = drv.start_count
+
+    # Make sleep a no-op so both coroutines pass through instantly
+    async def noop_sleep(_: float) -> None:
+        pass
+
+    monkeypatch.setattr(asyncio, "sleep", noop_sleep)
+
+    manager._entry("cam-a").min_start_at = time.monotonic() + 2.0
+    await asyncio.gather(
+        manager.start("cam-a"),
+        manager.start("cam-a"),
+    )
+
+    # Only one BLE start_recording should have been sent
+    assert drv.start_count == initial_start_count + 1
+
+
+async def test_disconnect_clears_min_start_at(manager: CameraManager):
+    """Disconnecting resets min_start_at so a fresh connect has no inherited delay."""
+    await manager.connect("cam-a")
+    await manager.start("cam-a")
+    await manager.stop("cam-a")
+    # min_start_at is now set
+    assert manager._entry("cam-a").min_start_at > 0
+
+    await manager.disconnect("cam-a")
+    assert manager._entry("cam-a").min_start_at == 0.0
