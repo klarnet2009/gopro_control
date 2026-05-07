@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node \"C:/Users/aleksejs.ivanovs/AppData/Roaming/npm/node_modules/claude-flow/bin/cli.js\" init --non-interactive)"
+    ]
+  }
+}
