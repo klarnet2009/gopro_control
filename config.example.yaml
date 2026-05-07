@@ -12,7 +12,10 @@ cameras:
   - id: cam-front
     name: "Front Camera"
     target: "1234"      # last 4 chars of camera serial (Settings → About → Camera Info)
-    mode: "ble"         # ble (fast, start/stop) | cohn (HTTP over Wi-Fi, clock sync, preview)
+    mode: "ble"         # ble | cohn | ble+cohn
+                      #   ble      — fast BLE control only (start/stop/status)
+                      #   cohn     — HTTP over Wi-Fi; clock sync, live preview; requires provisioning
+                      #   ble+cohn — dual transport: BLE for control, Wi-Fi for preview + clock sync
   - id: cam-side
     name: "Side Camera"
     target: "5678"

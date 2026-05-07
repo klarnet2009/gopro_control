@@ -409,6 +409,101 @@ async def test_stop_timeout_recovery_still_sets_post_stop_guards():
     assert entry.min_start_at >= before + POST_STOP_RECOVERY_SEC - 0.1
 
 
+# ---- BLE+COHN dual transport ------------------------------------------------
+
+
+async def test_blecohn_sync_time_succeeds():
+    """sync_time() and sync_time_all() must work for mode='ble+cohn'."""
+    cfg = CameraConfig(id="cam-dual", name="Dual", target="DDDD", mode="ble+cohn")
+    synced: list[str] = []
+
+    class _TrackingSyncDriver(FakeDriver):
+        async def sync_time(self) -> None:
+            synced.append(self.target)
+
+    mgr = CameraManager([cfg], driver_factory=lambda c: _TrackingSyncDriver(c.target, mode=c.mode))
+    await mgr.connect("cam-dual")
+
+    await mgr.sync_time("cam-dual")
+    assert synced == ["DDDD"]
+
+    synced.clear()
+    result = await mgr.sync_time_all()
+    assert result == {"cam-dual": "ok"}
+    assert synced == ["DDDD"]
+
+
+async def test_blecohn_sync_time_rejects_ble_only():
+    """sync_time() must raise for a plain BLE camera (no HTTP path)."""
+    cfg = CameraConfig(id="cam-ble", name="BLE", target="BBBB", mode="ble")
+    mgr = CameraManager([cfg], driver_factory=lambda c: FakeDriver(c.target, mode=c.mode))
+    await mgr.connect("cam-ble")
+
+    with pytest.raises(RuntimeError, match="not in COHN or BLE\\+COHN mode"):
+        await mgr.sync_time("cam-ble")
+
+
+async def test_blecohn_sync_time_all_skips_ble_only():
+    """sync_time_all() must silently skip cameras that are not COHN-capable."""
+    cameras = [
+        CameraConfig(id="ble-cam", name="BLE", target="BBBB", mode="ble"),
+        CameraConfig(id="dual-cam", name="Dual", target="DDDD", mode="ble+cohn"),
+    ]
+    synced: list[str] = []
+
+    class _TrackingSyncDriver(FakeDriver):
+        async def sync_time(self) -> None:
+            synced.append(self.target)
+
+    mgr = CameraManager(cameras, driver_factory=lambda c: _TrackingSyncDriver(c.target, mode=c.mode))
+    await mgr.connect("ble-cam")
+    await mgr.connect("dual-cam")
+
+    result = await mgr.sync_time_all()
+    # Only the ble+cohn camera should appear
+    assert "ble-cam" not in result
+    assert result.get("dual-cam") == "ok"
+    assert synced == ["DDDD"]
+
+
+async def test_blecohn_start_preview_succeeds():
+    """start_preview() must work for mode='ble+cohn'."""
+    cfg = CameraConfig(id="cam-dual", name="Dual", target="DDDD", mode="ble+cohn")
+    mgr = CameraManager([cfg], driver_factory=lambda c: FakeDriver(c.target, mode=c.mode))
+    await mgr.connect("cam-dual")
+
+    url = await mgr.start_preview("cam-dual")
+    assert url.startswith("rtsp://")
+
+
+async def test_blecohn_start_preview_rejects_ble_only():
+    """start_preview() must raise for a plain BLE camera."""
+    cfg = CameraConfig(id="cam-ble", name="BLE", target="BBBB", mode="ble")
+    mgr = CameraManager([cfg], driver_factory=lambda c: FakeDriver(c.target, mode=c.mode))
+    await mgr.connect("cam-ble")
+
+    with pytest.raises(RuntimeError, match="COHN or BLE\\+COHN mode"):
+        await mgr.start_preview("cam-ble")
+
+
+async def test_blecohn_provision_shows_dual_option(_patch_provision_driver):
+    """Provisioning a camera then upgrading it to ble+cohn mode must work end-to-end."""
+    from gopro_mgmt.manager import CameraManager
+    from gopro_mgmt.schemas import CameraConfig
+
+    def factory(cfg: CameraConfig):
+        return FakeDriver(cfg.target, mode=cfg.mode)
+
+    # Camera starts in plain BLE mode; user provisions COHN, then upgrades
+    mgr = CameraManager(
+        [CameraConfig(id="cam-d", name="Cam D", target="4444", mode="ble+cohn")],
+        driver_factory=factory,
+    )
+    s = await mgr.provision_cohn("cam-d", "MyWifi", "longerthan8")
+    assert s.cohn_provisioned is True
+    assert s.cohn_ip == "192.168.1.42"
+
+
 async def test_supported_caps_cleared_on_disconnect(manager: CameraManager):
     """Regression for HI-02: supported_caps populated by get_settings must NOT
     survive a disconnect, otherwise stale Hero-9 caps would reject Hero-12
