@@ -526,6 +526,11 @@ body {
   color: #5eead4;
   background: rgba(45, 212, 191, 0.10);
 }
+.badge-mode[data-mode="ble+cohn"] {
+  border-color: rgba(45, 212, 191, 0.55);
+  color: #5eead4;
+  background: linear-gradient(90deg, rgba(124,92,255,0.12) 0%, rgba(45,212,191,0.12) 100%);
+}
 
 /* preset-group chip (VIDEO / PHOTO / TIMELAPSE) */
 .badge-preset-group {
@@ -1562,6 +1567,11 @@ button:not([disabled]):active {
   background: var(--surface-3);
   color: var(--text-mute);
   border: 1px solid var(--border);
+}
+.mode-tag-dual {
+  background: rgba(45, 212, 191, 0.10);
+  color: #5eead4;
+  border: 1px solid rgba(45, 212, 191, 0.40);
 }
 
 /* BLE badge on camera cards — neutral (standard mode, no special emphasis) */

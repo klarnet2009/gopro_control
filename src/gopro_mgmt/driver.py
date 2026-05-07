@@ -115,7 +115,7 @@ class WirelessGoProDriver:
         timing: TimingConfig | None = None,
     ) -> None:
         self._target = target
-        self._mode = mode                  # "ble" | "ble+wifi" | "cohn"
+        self._mode = mode                  # "ble" | "ble+wifi" | "cohn" | "ble+cohn"
         self._timing = timing or TimingConfig()
         self._gopro: Any | None = None
         self._model: str | None = None
@@ -136,6 +136,17 @@ class WirelessGoProDriver:
         # can show "5/7 telemetry sources alive" in the UI.
         self._observer_status: dict[str, str] = {}
 
+    # ── Transport helpers ────────────────────────────────────────────────
+    @property
+    def _use_ble(self) -> bool:
+        """True when BLE is the primary control transport for this driver."""
+        return self._mode in ("ble", "ble+wifi", "ble+cohn")
+
+    @property
+    def _use_cohn_http(self) -> bool:
+        """True when COHN HTTP is available (COHN-only or BLE+COHN dual mode)."""
+        return self._mode in ("cohn", "ble+cohn")
+
     async def open(self) -> None:
         from open_gopro import WirelessGoPro  # lazy import
         Iface = WirelessGoPro.Interface
@@ -154,6 +165,24 @@ class WirelessGoProDriver:
             self._model = await self._read_model_http()
             self._start_keepalive()
             log.info("opened camera target=%s mode=cohn model=%s", self._target, self._model)
+            return
+
+        if self._mode == "ble+cohn":
+            # Dual mode: BLE for control (shutter, status, settings) +
+            # COHN HTTP for preview and clock sync.
+            # Do NOT skip cohn.wait_until_ready — the camera is provisioned and
+            # will respond. NullWifiController is correct here because we connect
+            # to the camera's home network IP, not a camera-hosted AP.
+            self._gopro = WirelessGoPro(
+                target=self._target,
+                interfaces={Iface.BLE, Iface.COHN},
+                wifi_adapter=_NullWifiController,
+                cohn_db=COHN_DB_PATH,
+            )
+            await self._gopro.open()
+            self._model = await self._read_model()   # BLE is available → prefer it
+            self._start_keepalive()
+            log.info("opened camera target=%s mode=ble+cohn model=%s", self._target, self._model)
             return
 
         # ── BLE / BLE+WiFi paths (legacy behaviour) ──────────────────────
@@ -453,8 +482,8 @@ class WirelessGoProDriver:
         self._require_open()
         from open_gopro.models.constants import Toggle
 
-        if self._mode == "cohn":
-            # ── HTTP path: ensure Video preset group via http_command ─────
+        if not self._use_ble:
+            # ── HTTP path (COHN-only mode): ensure Video preset group ─────
             try:
                 state_resp = await asyncio.wait_for(
                     self._gopro.http_command.get_camera_state(),
@@ -532,7 +561,7 @@ class WirelessGoProDriver:
         self._require_open()
         from open_gopro.models.constants import Toggle
 
-        if self._mode == "cohn":
+        if not self._use_ble:
             resp = await asyncio.wait_for(
                 self._gopro.http_command.set_shutter(shutter=Toggle.DISABLE),
                 timeout=self._timing.http_cmd_timeout_sec,
@@ -550,7 +579,7 @@ class WirelessGoProDriver:
         self._require_open()
         gp = self._gopro
 
-        if self._mode == "cohn":
+        if not self._use_ble:
             # Single HTTP call returns all statuses at once.
             state_resp = await asyncio.wait_for(
                 gp.http_command.get_camera_state(), timeout=self._timing.http_cmd_timeout_sec,
@@ -655,7 +684,7 @@ class WirelessGoProDriver:
         gp = self._gopro
         result: dict[str, Any] = {}
 
-        if self._mode == "cohn":
+        if not self._use_ble:
             try:
                 from open_gopro.models.constants.settings import (
                     FramesPerSecond,
@@ -739,8 +768,8 @@ class WirelessGoProDriver:
         gp = self._gopro
         result: dict[str, Any] = {}
 
-        if self._mode == "cohn":
-            # ── COHN: read current values from camera state, fall back to
+        if not self._use_ble:
+            # ── COHN-only: read current values from camera state, fall back to
             #    static model caps for the supported lists. http_setting in
             #    SDK 0.22 doesn't reliably expose get_capabilities_values().
             cur = await self.get_current_video_settings()
@@ -912,7 +941,7 @@ class WirelessGoProDriver:
             VideoResolution,
         )
 
-        is_cohn = self._mode == "cohn"
+        is_cohn = not self._use_ble   # True only in COHN-only mode
         timeout = (
             self._timing.http_cmd_timeout_sec
             if is_cohn
@@ -980,7 +1009,7 @@ class WirelessGoProDriver:
         """Switch the camera's active preset group: 'video', 'photo', or 'timelapse'."""
         self._require_open()
 
-        if self._mode == "cohn":
+        if not self._use_ble:
             # http_command.load_preset_group accepts a raw int group id.
             _MODE_MAP_INT = {"video": 1000, "photo": 1001, "timelapse": 1002}
             group_int = _MODE_MAP_INT.get(mode)
@@ -1023,7 +1052,8 @@ class WirelessGoProDriver:
         now = datetime.now()
         tz_min, is_dst = _local_tz_offset_minutes()
 
-        if self._mode == "cohn":
+        if self._use_cohn_http:
+            # Prefer HTTP time sync when COHN is available (cohn or ble+cohn).
             resp = await asyncio.wait_for(
                 self._gopro.http_command.set_date_time(
                     date_time=now, tz_offset=tz_min, is_dst=is_dst,
@@ -1031,7 +1061,7 @@ class WirelessGoProDriver:
                 timeout=self._timing.http_cmd_timeout_sec,
             )
             _check_resp(resp)
-            log.info("synced time on %s (cohn) tz=%+d min dst=%s", self._target, tz_min, is_dst)
+            log.info("synced time on %s (%s/http) tz=%+d min dst=%s", self._target, self._mode, tz_min, is_dst)
         else:
             resp = await asyncio.wait_for(
                 self._gopro.ble_command.set_date_time(
@@ -1083,8 +1113,8 @@ class WirelessGoProDriver:
     async def start_webcam_rtsp(self, *, resolution: str = "720", fov: str = "WIDE") -> str:
         """Start RTSP webcam stream. Returns rtsp://{ip}:554/live."""
         self._require_open()
-        if self._mode != "cohn":
-            raise RuntimeError("webcam preview is only supported in COHN mode")
+        if not self._use_cohn_http:
+            raise RuntimeError("webcam preview is only supported in COHN or BLE+COHN mode")
         from open_gopro.models.constants import Toggle
         from open_gopro.models.streaming import (
             WebcamFOV,
@@ -1127,7 +1157,7 @@ class WirelessGoProDriver:
     async def stop_webcam(self) -> None:
         """Stop RTSP webcam stream and exit webcam mode."""
         self._require_open()
-        if self._mode != "cohn":
+        if not self._use_cohn_http:
             return
         try:
             await asyncio.wait_for(

@@ -389,8 +389,8 @@ class CameraManager:
         responsible for the ffmpeg/MJPEG transcoding lifecycle on top of this.
         """
         e = self._entry(cam_id)
-        if e.config.mode != "cohn":
-            raise RuntimeError(f"camera {cam_id} must be in COHN mode for preview")
+        if e.config.mode not in ("cohn", "ble+cohn"):
+            raise RuntimeError(f"camera {cam_id} must be in COHN or BLE+COHN mode for preview")
         if e.status.connection != "connected":
             raise RuntimeError(f"camera {cam_id} is not connected")
         async with e.lock:
@@ -439,11 +439,11 @@ class CameraManager:
             return e.status.model_copy()
 
     async def sync_time(self, cam_id: str) -> None:
-        """Set the clock on one connected COHN camera to the server's current time."""
+        """Set the clock on one connected COHN or BLE+COHN camera to the server's current time."""
         e = self._entry(cam_id)
         async with e.lock:
-            if e.config.mode != "cohn":
-                raise RuntimeError(f"camera {cam_id} is not in COHN mode")
+            if e.config.mode not in ("cohn", "ble+cohn"):
+                raise RuntimeError(f"camera {cam_id} is not in COHN or BLE+COHN mode")
             if e.driver is None:
                 raise RuntimeError(f"camera {cam_id} is not connected")
             await e.driver.sync_time()
@@ -455,7 +455,7 @@ class CameraManager:
         """
         connected = [
             (cid, e) for cid, e in self._entries.items()
-            if e.driver is not None and e.config.mode == "cohn"
+            if e.driver is not None and e.config.mode in ("cohn", "ble+cohn")
         ]
         if not connected:
             return {}

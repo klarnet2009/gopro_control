@@ -365,8 +365,8 @@ def build_router() -> APIRouter:
         try:
             mgr = _mgr(request)
             st = mgr.get_status(cam_id)
-            if st.mode != "cohn":
-                raise HTTPException(status_code=409, detail="clock sync is only supported for COHN cameras")
+            if st.mode not in ("cohn", "ble+cohn"):
+                raise HTTPException(status_code=409, detail="clock sync is only supported for COHN or BLE+COHN cameras")
             await mgr.sync_time(cam_id)
         except HTTPException:
             raise

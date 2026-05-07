@@ -210,7 +210,8 @@ function stopLinkingEscalation(id) {
 // ─── COHN info visibility (Add/Edit dialog) ──────────────────────────────
 function updateCohnInfoVisibility(mode, editingId = null) {
   if (!cohnInfo) return;
-  if (mode !== "cohn") { cohnInfo.classList.add("hidden"); return; }
+  const needsCohn = mode === "cohn" || mode === "ble+cohn";
+  if (!needsCohn) { cohnInfo.classList.add("hidden"); return; }
   // If editing an already-provisioned camera, no need for wizard info
   if (editingId) {
     const s = lastStatus.get(editingId);
@@ -277,9 +278,10 @@ function renderStatus(s) {
   modeEl.textContent = (s.mode || "ble").toUpperCase();
   modeEl.dataset.mode = s.mode || "ble";
   modeEl.title =
-    (s.mode === "cohn")     ? "Transport: COHN (HTTP over home Wi-Fi, enables live preview)"
-  : (s.mode === "ble+wifi") ? "Transport: BLE + Wi-Fi (also enables HTTP commands and media access)"
-  :                            "Transport: BLE only (faster, sufficient for start/stop)";
+    (s.mode === "cohn")      ? "Transport: COHN only (HTTP over home Wi-Fi, enables live preview)"
+  : (s.mode === "ble+cohn")  ? "Transport: BLE+COHN dual (BLE for control, Wi-Fi for preview & clock sync)"
+  : (s.mode === "ble+wifi")  ? "Transport: BLE + Wi-Fi (also enables HTTP commands and media access)"
+  :                             "Transport: BLE only (faster, sufficient for start/stop)";
 
   // Camera preset-group badge (VIDEO / PHOTO / TIMELAPSE)
   // preset_group: 1000=video, 1001=photo, 1002=timelapse; null=unknown
@@ -500,10 +502,10 @@ function renderStatus(s) {
       : isConnected ? "" : "Connect camera to change settings";
   });
 
-  // PREVIEW button (visible only for connected cohn cameras)
+  // PREVIEW button (visible for connected COHN or BLE+COHN cameras)
   const btnPreview = card.querySelector(".btn-preview");
   if (btnPreview) {
-    const previewable = isConnected && s.mode === "cohn";
+    const previewable = isConnected && (s.mode === "cohn" || s.mode === "ble+cohn");
     btnPreview.hidden = !previewable;
     if (!previewable) {
       // Force-hide the panel if camera left COHN/disconnected mid-stream
@@ -511,10 +513,11 @@ function renderStatus(s) {
     }
   }
 
-  // PROVISION icon (header) — visible only for unprovisioned COHN cameras
+  // PROVISION icon (header) — visible for unprovisioned COHN-capable cameras
   const btnProv = card.querySelector(".btn-provision");
   if (btnProv) {
-    btnProv.hidden = !(s.mode === "cohn" && !s.cohn_provisioned);
+    const cohnCapable = s.mode === "cohn" || s.mode === "ble+cohn";
+    btnProv.hidden = !(cohnCapable && !s.cohn_provisioned);
   }
 
   // Auto-reconnect check — must run before lastStatus.set so we can diff
@@ -838,8 +841,8 @@ function refreshGlobalState() {
     ? `Stop recording on ${rolling.length} camera(s)`
     : "No cameras are recording";
 
-  // Sync Clocks button — enabled only when at least one COHN camera is connected
-  const cohnConnected = connected.filter(s => s.mode === "cohn");
+  // Sync Clocks button — enabled when at least one COHN or BLE+COHN camera is connected
+  const cohnConnected = connected.filter(s => s.mode === "cohn" || s.mode === "ble+cohn");
   if (btnSyncTime) {
     btnSyncTime.disabled = cohnConnected.length === 0;
     btnSyncTime.title = cohnConnected.length === 0
@@ -928,6 +931,9 @@ function resetDialog() {
   scanList.innerHTML = "";
   scanEmpty.classList.add("hidden");
   if (cohnInfo) cohnInfo.classList.add("hidden");
+  // BLE+COHN option hidden by default; shown only when camera is already provisioned
+  const dualOpt = document.getElementById("mode-opt-blecohn");
+  if (dualOpt) dualOpt.hidden = true;
   dialogForm.elements.id.readOnly = false;
 }
 
@@ -957,10 +963,14 @@ function openEditDialog(id) {
   const mode = s?.mode || "ble";
   Array.from(dialogForm.elements.mode).forEach(r => { r.checked = (r.value === mode); });
 
+  // Show BLE+COHN option only when camera has been provisioned
+  const dualOpt = document.getElementById("mode-opt-blecohn");
+  if (dualOpt) dualOpt.hidden = !s?.cohn_provisioned;
+
   if (s?.connection === "connected") {
     dialogWarn.textContent = "Changing target or mode will auto-disconnect the camera.";
     dialogWarn.classList.remove("hidden");
-  } else if (mode === "cohn" && !s?.cohn_provisioned) {
+  } else if ((mode === "cohn" || mode === "ble+cohn") && !s?.cohn_provisioned) {
     dialogWarn.textContent = "This camera is not yet provisioned. Save first, then click the gear icon on the card to provision.";
     dialogWarn.classList.remove("hidden");
   }
@@ -999,8 +1009,9 @@ dialogForm.addEventListener("submit", async (ev) => {
       if (r.data) renderStatus(r.data);
       toast("success", `Channel "${body.name}" added`);
       dialog.close();
-      // Auto-trigger COHN provision wizard if needed
-      if (body.mode === "cohn" && r.data && !r.data.cohn_provisioned) {
+      // Auto-trigger COHN provision wizard if COHN-capable but not yet provisioned
+      const needsProvision = (body.mode === "cohn" || body.mode === "ble+cohn");
+      if (needsProvision && r.data && !r.data.cohn_provisioned) {
         setTimeout(() => {
           const entry = cardsById.get(body.id);
           if (entry) onProvisionCohn(entry);
@@ -1012,8 +1023,9 @@ dialogForm.addEventListener("submit", async (ev) => {
       const r = await api("PATCH", `/api/cameras/${id}`, body);
       if (r.data) renderStatus(r.data);
       dialog.close();
-      // Auto-trigger COHN provision wizard if switched to COHN and not provisioned
-      if (body.mode === "cohn" && r.data && !r.data.cohn_provisioned) {
+      // Auto-trigger COHN provision wizard if switched to COHN-capable and not provisioned
+      const needsProvision = (body.mode === "cohn" || body.mode === "ble+cohn");
+      if (needsProvision && r.data && !r.data.cohn_provisioned) {
         setTimeout(() => {
           const entry = cardsById.get(id);
           if (entry) onProvisionCohn(entry);

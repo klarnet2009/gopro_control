@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 ConnectionState = Literal["disconnected", "connecting", "connected", "error"]
-ConnectionMode = Literal["ble", "ble+wifi", "cohn"]
+ConnectionMode = Literal["ble", "ble+wifi", "cohn", "ble+cohn"]
 
 ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,30}$"
 TARGET_PATTERN = r"^[A-Za-z0-9]{4}$"
@@ -20,7 +20,7 @@ class CameraConfig(BaseModel):
     )
     mode: ConnectionMode = Field(
         default="ble",
-        description="Transport: 'ble' (faster, sufficient for start/stop), 'ble+wifi' (also enables HTTP, media, streaming), or 'cohn' (HTTP over home Wi-Fi, requires one-time provisioning, enables live preview).",
+        description="Transport: 'ble' (faster, sufficient for start/stop), 'ble+wifi' (also enables HTTP, media, streaming), 'cohn' (HTTP over home Wi-Fi, requires one-time provisioning, enables live preview), or 'ble+cohn' (dual: BLE for control commands + COHN for preview and clock sync, requires provisioning).",
     )
 
 
