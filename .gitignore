@@ -17,7 +17,15 @@ logs/
 .gopro_pid
 .gopro_server.log
 GoPro-Roll-Call-mac.zip
-.claude/
+# Ignore local Claude settings/state but track project commands and agents
+.claude/settings.json
+.claude/settings.json.bak
+.claude/checkpoints/
+.claude/mcp.json
+.claude/statusline*
+.claude/*.sh
+.claude/*.mjs
+.claude/config/
 COHN_PLAN.md
 COHN_RESEARCH.md
 REVIEW.md

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gopro-mgmt",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "gopro_mgmt", "--config", "config.yaml", "--log-level", "info"],
+      "port": 8000
+    }
+  ]
+}

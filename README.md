@@ -39,15 +39,19 @@ Edit `config.yaml` and set `target` to the **last 4 characters** of each camera'
 |------|-------------|----------|
 | `ble` | Bluetooth LE only | Fast connect, start/stop recording, battery/SD status |
 | `cohn` | HTTP over your home Wi-Fi (Camera on Home Network) | Clock sync, live preview (requires ffmpeg), reliable on busy sets |
+| `ble+cohn` | BLE for control + Wi-Fi for preview/sync | Best of both: fastest shutter + preview + clock sync |
 
 #### Setting up COHN
 
-COHN requires a one-time provisioning step per camera:
+COHN and `ble+cohn` require a one-time provisioning step per camera:
 
-1. Add the camera with `mode: ble` in `config.yaml`
+1. Add the camera with any mode in `config.yaml`
 2. In the web UI, click the **⚙ Provision COHN** button on the camera card
 3. Enter your Wi-Fi SSID and password — the camera will join the network and reboot (~30 s)
-4. Change the camera's `mode` to `cohn` in `config.yaml` (or edit it in the UI)
+4. Change the camera's `mode` to `cohn` or `ble+cohn` in `config.yaml` (or edit it in the UI)
+
+`ble+cohn` uses BLE for all control commands (shutter, settings) and Wi-Fi only for live preview
+and clock sync — no extra setup beyond provisioning.
 
 After provisioning, click **LINK** — the camera connects over HTTP instead of BLE.
 
