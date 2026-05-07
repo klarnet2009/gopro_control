@@ -182,6 +182,9 @@ class WirelessGoProDriver:
             await self._gopro.open()
             self._model = await self._read_model()   # BLE is available → prefer it
             self._start_keepalive()
+            # Start BLE push-notification observers so battery/SD/settings flow
+            # in real-time from the BLE connection, same as pure BLE mode.
+            self._start_ble_detail_observers()
             log.info("opened camera target=%s mode=ble+cohn model=%s", self._target, self._model)
             return
 
@@ -655,7 +658,7 @@ class WirelessGoProDriver:
         which holds a BleClient at _ble._handle (bleak.BleakClient). On macOS/
         CoreBluetooth, BleakClient.get_rssi() issues a readRSSI() request.
         """
-        if self._gopro is None or self._mode == "cohn":
+        if self._gopro is None or not self._use_ble:
             return None
         try:
             # open_gopro path: WirelessGoPro._ble (GoProBle) → ._ble (BleClient) → ._handle (BleakClient)
