@@ -177,6 +177,176 @@ body {
 .ws-state[data-state="closed"] .ws-dot { background: var(--err); }
 .ws-state[data-state="connecting"] .ws-dot { background: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
 
+.atem-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  position: relative;
+}
+
+.atem-ind {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-mute);
+  cursor: default;
+  transition: color 200ms ease;
+}
+.atem-ind .atem-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--text-mute);
+  transition: background 200ms ease, box-shadow 200ms ease;
+}
+.atem-ind[data-state="searching"] .atem-dot {
+  animation: pulse 1.5s ease-in-out infinite;
+}
+.atem-ind[data-state="connected"] {
+  color: var(--ok);
+}
+.atem-ind[data-state="connected"] .atem-dot {
+  background: var(--ok);
+  box-shadow: 0 0 6px rgba(34,217,122,0.4);
+}
+.atem-ind[data-state="recording"] {
+  color: var(--rec);
+}
+.atem-ind[data-state="recording"] .atem-dot {
+  background: var(--rec);
+  box-shadow: 0 0 8px var(--rec-glow);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.atem-conn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+  min-width: 44px;
+  text-align: center;
+}
+.atem-conn[data-state="connected"] { color: var(--ok); }
+.atem-conn[data-state="recording"] { color: var(--rec); }
+.atem-conn[data-state="searching"] { color: var(--warn); }
+
+.atem-auto-btn {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-mute);
+  cursor: pointer;
+  transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+}
+.atem-auto-btn:hover {
+  color: var(--text-dim);
+  border-color: var(--border-hi);
+}
+.atem-auto-btn[data-on="true"] {
+  color: var(--ok);
+  border-color: var(--ok-line);
+  background: var(--ok-soft);
+}
+.atem-auto-btn[data-on="true"]:hover {
+  background: rgba(34,217,122,0.18);
+}
+.atem-monitor {
+  position: relative;
+  font-family: var(--font-mono);
+}
+.atem-monitor summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-mute);
+  user-select: none;
+}
+.atem-monitor summary::-webkit-details-marker { display: none; }
+.atem-monitor[open] summary {
+  color: var(--primary-hi);
+  border-color: var(--primary-line);
+  background: var(--primary-soft);
+}
+.atem-monitor-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: min(420px, calc(100vw - 32px));
+  padding: 10px;
+  border: 1px solid var(--border-hi);
+  border-radius: var(--r);
+  background: rgba(17, 19, 26, 0.98);
+  box-shadow: var(--shadow-soft);
+  z-index: 120;
+}
+.atem-monitor-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 8px;
+  color: var(--text-mute);
+  font-size: 10px;
+}
+.atem-monitor-head span:last-child {
+  color: var(--text-dim);
+  max-width: 250px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atem-events {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.atem-events li {
+  display: grid;
+  grid-template-columns: 58px 72px 1fr;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: rgba(255,255,255,0.03);
+  font-size: 10.5px;
+}
+.atem-events span { color: var(--text-mute); }
+.atem-events b {
+  color: var(--text-dim);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+.atem-events em {
+  color: var(--text);
+  font-style: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.atem-events li[data-level="ok"] b,
+.atem-events li[data-level="ok"] em { color: var(--ok); }
+.atem-events li[data-level="rec"] b,
+.atem-events li[data-level="rec"] em { color: var(--rec); }
+.atem-events li[data-level="warn"] b,
+.atem-events li[data-level="warn"] em { color: var(--warn); }
+.atem-events li[data-level="err"] b,
+.atem-events li[data-level="err"] em { color: var(--err); }
+
 .rail-clock {
   font-family: var(--font-mono);
   font-size: 12.5px;
@@ -462,6 +632,17 @@ body {
 }
 .tally[data-state="connecting"] .tally-label { color: var(--warn); }
 
+.tally[data-state="stopping"] {
+  background: var(--warn-soft);
+  border-color: var(--warn-line);
+}
+.tally[data-state="stopping"] .tally-light {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-soft);
+  animation: pulse 2s ease-in-out infinite;
+}
+.tally[data-state="stopping"] .tally-label { color: var(--warn); }
+
 .tally[data-state="error"] {
   background: var(--err-soft);
   border-color: var(--err-line);
@@ -514,6 +695,7 @@ body {
 }
 .readout-value[data-warn="low"]  { color: var(--warn); }
 .readout-value[data-warn="crit"] { color: var(--rec); }
+.readout-value[data-warn="unknown"] { color: var(--text-mute); }
 /* Spans the bar + value columns — used for text-only readouts (res, lens, stab) */
 .readout-wide {
   grid-column: 2 / -1;
@@ -554,6 +736,47 @@ body {
   transition: width 300ms ease;
   border-radius: 2px;
 }
+.cam-rssi-bar {
+  display: inline-flex;
+  align-items: end;
+  justify-content: flex-start;
+  gap: 3px;
+  min-height: 14px;
+}
+.cam-rssi-bar i {
+  display: block;
+  width: 5px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 1px;
+}
+.cam-rssi-bar i:nth-child(1) { height: 4px; }
+.cam-rssi-bar i:nth-child(2) { height: 7px; }
+.cam-rssi-bar i:nth-child(3) { height: 10px; }
+.cam-rssi-bar i:nth-child(4) { height: 13px; }
+.cam-rssi-bar i.on { background: var(--ok); }
+
+/* signal — 4 ascending bars (BLE RSSI) */
+.signal-bar {
+  height: 14px;
+  align-items: flex-end;
+  gap: 3px;
+}
+.signal-bar i {
+  flex: none;
+  width: 6px;
+  background: rgba(255,255,255,0.07);
+  border-radius: 1.5px;
+  transition: background 240ms ease;
+}
+.signal-bar i:nth-child(1) { height: 4px; }
+.signal-bar i:nth-child(2) { height: 7px; }
+.signal-bar i:nth-child(3) { height: 10px; }
+.signal-bar i:nth-child(4) { height: 13px; }
+.signal-bar[data-level="ok"]   i.on { background: var(--ok); }
+.signal-bar[data-level="warn"] i.on { background: var(--warn); }
+.signal-bar[data-level="crit"] i.on { background: var(--rec); }
+.signal-bar[data-level="none"] i    { background: rgba(255,255,255,0.07); }
+.cam-sig-row[data-stale="true"]     { opacity: 0.45; }
 
 /* ========================== SETTINGS PANEL ======================== */
 

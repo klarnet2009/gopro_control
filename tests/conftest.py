@@ -13,7 +13,7 @@ from gopro_mgmt.schemas import AppConfig, CameraConfig, ServerConfig
 class FakeDriver:
     """In-memory stand-in for WirelessGoPro used across the test suite."""
 
-    instances: list["FakeDriver"] = []
+    instances: list[FakeDriver] = []
 
     def __init__(self, target: str, *, mode: str = "ble", enable_wifi: bool = False) -> None:
         # Accept BOTH old (enable_wifi=) and new (mode=) ctor signatures so
@@ -35,6 +35,8 @@ class FakeDriver:
         self.fail_start: Exception | None = None
         self.fail_provision: Exception | None = None
         self.last_provision_args: tuple[str, str] | None = None
+        self.start_count = 0
+        self.stop_count = 0
         FakeDriver.instances.append(self)
 
     async def open(self) -> None:
@@ -74,11 +76,13 @@ class FakeDriver:
         if not self.is_open:
             raise RuntimeError("not open")
         self.encoding = True
+        self.start_count += 1
 
     async def stop_recording(self) -> None:
         if not self.is_open:
             raise RuntimeError("not open")
         self.encoding = False
+        self.stop_count += 1
 
     async def get_status(self) -> dict[str, Any]:
         return {
@@ -86,6 +90,9 @@ class FakeDriver:
             "battery_percent": self.battery,
             "sd_remaining_sec": self.sd_remaining,
         }
+
+    async def get_rssi(self) -> int | None:
+        return None
 
     async def sync_time(self) -> None:
         return None

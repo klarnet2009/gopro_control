@@ -225,7 +225,7 @@ def _patch_provision_driver_routes(monkeypatch):
     from gopro_mgmt import manager as mgr_mod
 
     class _StubDriver:
-        def __init__(self, target, *, mode="ble"):
+        def __init__(self, target, *, mode="ble", **_kwargs):
             self.target = target
             self.mode = mode
 

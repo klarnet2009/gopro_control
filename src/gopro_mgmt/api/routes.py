@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
-import subprocess
 import re
+import subprocess
+from collections.abc import Awaitable, Callable
 from shutil import which
-from typing import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
@@ -79,6 +79,30 @@ def _get_current_ssid() -> str | None:
 
 
 def build_router() -> APIRouter:
+    """Build the REST router.
+
+    Error response convention:
+      • HTTPException — for HTTP-layer concerns: missing resource (404),
+        request/state conflicts visible to the schema layer (409 — e.g.
+        "must be COHN to sync time"), input validation against schema or
+        manager-side capability checks (422). The body is FastAPI's standard
+        ``{"detail": "..."}``.
+      • CommandResult.failure(code, message) — for command-execution failures
+        where the request was well-formed but the camera/SDK refused or the
+        BLE/HTTP round-trip errored. Returned as HTTP 200 + envelope so the UI
+        can surface the message inline next to the camera card without treating
+        it as a transport error.
+
+    Note: ``RuntimeError("not connected")`` from the manager intentionally
+    falls into CommandResult.failure rather than 409 — the UI treats it as a
+    per-card error (toast/error pill) rather than a global HTTP failure. If
+    you want 409 semantics for a specific endpoint, catch CameraNotFound +
+    a state-pre-check via ``mgr.get_status(...).connection`` before calling
+    the command.
+
+    The web client's api() helper handles both shapes. Keep new endpoints in
+    line with this split; do not mix the two for the same failure mode.
+    """
     router = APIRouter(prefix="/api")
 
     def _mgr(request: Request) -> CameraManager:
@@ -164,9 +188,9 @@ def build_router() -> APIRouter:
             status = await mgr.connect(cam_id)
             await bus.broadcast({"type": "status", "payload": status.model_dump()})
             return CommandResult.success(status.model_dump())
-        except CameraNotFound:
-            raise HTTPException(status_code=404, detail=f"unknown camera: {cam_id}")
         except Exception as exc:
+            # Camera existence was already verified above, so CameraNotFound
+            # cannot fire here — only camera-side errors (BLE timeout, etc.).
             failed = mgr.get_status(cam_id)
             await bus.broadcast({"type": "status", "payload": failed.model_dump()})
             return CommandResult.failure("connect_failed", str(exc))
@@ -194,12 +218,24 @@ def build_router() -> APIRouter:
     @router.post("/cameras/{cam_id}/record/stop")
     async def stop_one(cam_id: str, request: Request):
         try:
-            status = await _mgr(request).stop(cam_id)
-            await _bus(request).broadcast({"type": "status", "payload": status.model_dump()})
+            mgr = _mgr(request)
+            bus = _bus(request)
+            # Optimistic update: tell all clients the camera stopped immediately.
+            # The actual BLE/HTTP command can take 5-10s while GoPro finalises
+            # the file on SD — the real confirmed state follows once it completes.
+            cur = mgr.get_status(cam_id)
+            await bus.broadcast({"type": "status", "payload": cur.model_copy(update={"encoding": False}).model_dump()})
+            status = await mgr.stop(cam_id)
+            await bus.broadcast({"type": "status", "payload": status.model_dump()})
             return CommandResult.success(status.model_dump())
         except CameraNotFound:
             raise HTTPException(status_code=404, detail=f"unknown camera: {cam_id}")
         except Exception as exc:
+            # Restore accurate state so the UI reflects what actually happened.
+            try:
+                await _bus(request).broadcast({"type": "status", "payload": _mgr(request).get_status(cam_id).model_dump()})
+            except Exception:
+                pass
             return CommandResult.failure("stop_failed", str(exc))
 
     @router.post("/cameras/record/start")
@@ -212,10 +248,16 @@ def build_router() -> APIRouter:
 
     @router.post("/cameras/record/stop")
     async def stop_all(request: Request):
-        statuses = await _mgr(request).stop_all()
+        mgr = _mgr(request)
+        bus = _bus(request)
+        # Optimistic broadcast for every recording camera before the slow BLE/HTTP stop
+        for s in mgr.list_status():
+            if s.encoding:
+                await bus.broadcast({"type": "status", "payload": s.model_copy(update={"encoding": False}).model_dump()})
+        statuses = await mgr.stop_all()
         payload = [s.model_dump() for s in statuses]
         for s in payload:
-            await _bus(request).broadcast({"type": "status", "payload": s})
+            await bus.broadcast({"type": "status", "payload": s})
         return CommandResult.success(payload)
 
     @router.get("/wifi-ssid")
@@ -226,7 +268,7 @@ def build_router() -> APIRouter:
         Returns {ssid: "..."} on success, {ssid: null} when not connected
         or the platform is unsupported. Never raises — UI degrades gracefully.
         """
-        ssid = await asyncio.get_event_loop().run_in_executor(None, _get_current_ssid)
+        ssid = await asyncio.get_running_loop().run_in_executor(None, _get_current_ssid)
         return CommandResult.success({"ssid": ssid})
 
     @router.post("/scan")
@@ -237,6 +279,8 @@ def build_router() -> APIRouter:
         except Exception as exc:
             log.exception("BLE scan failed")
             return CommandResult.failure("scan_failed", str(exc))
+        for status in _mgr(request).update_signal_from_scan(results):
+            await _bus(request).broadcast({"type": "status", "payload": status.model_dump()})
         payload = [r.model_dump() for r in results]
         await _bus(request).broadcast({"type": "scan_result", "payload": payload})
         return CommandResult.success(payload)
@@ -276,6 +320,11 @@ def build_router() -> APIRouter:
             )
         except CameraNotFound:
             raise HTTPException(status_code=404, detail=f"unknown camera: {cam_id}")
+        except ValueError as exc:
+            # Manager-side validation against the camera's advertised
+            # capabilities — a 422 lets the client surface a precise message
+            # without polluting the CommandResult error envelope.
+            raise HTTPException(status_code=422, detail=str(exc))
         except Exception as exc:
             return CommandResult.failure("settings_failed", str(exc))
         await _bus(request).broadcast({"type": "status", "payload": status.model_dump()})
@@ -291,6 +340,11 @@ def build_router() -> APIRouter:
             status = await _mgr(request).set_mode(cam_id, payload.mode)
         except CameraNotFound:
             raise HTTPException(status_code=404, detail=f"unknown camera: {cam_id}")
+        except ValueError as exc:
+            # Defense-in-depth: ModePayload's Literal already rejects unknown
+            # modes at schema time; this catches direct manager calls bypassing
+            # the API or schema loosening.
+            raise HTTPException(status_code=422, detail=str(exc))
         except Exception as exc:
             return CommandResult.failure("mode_failed", str(exc))
         await _bus(request).broadcast({"type": "status", "payload": status.model_dump()})
@@ -340,7 +394,7 @@ def build_router() -> APIRouter:
         return CommandResult.success(status.model_dump())
 
     # ── Live preview (RTSP via ffmpeg → MJPEG over HTTP) ──────────────────
-    def _preview_procs(req: Request) -> dict[str, "asyncio.subprocess.Process"]:
+    def _preview_procs(req: Request) -> dict[str, asyncio.subprocess.Process]:
         if not hasattr(req.app.state, "preview_procs"):
             req.app.state.preview_procs = {}
         return req.app.state.preview_procs
@@ -355,22 +409,15 @@ def build_router() -> APIRouter:
             )
         mgr = _mgr(request)
         try:
-            st = mgr.get_status(cam_id)
+            rtsp_url = await mgr.start_preview(cam_id)
         except CameraNotFound:
             raise HTTPException(status_code=404, detail=f"unknown camera: {cam_id}")
-        if st.connection != "connected" or st.mode != "cohn":
-            raise HTTPException(status_code=409, detail="camera must be connected in COHN mode")
-
-        # Acquire camera RTSP URL via driver. Intentional internal access:
-        # the manager doesn't (yet) expose a high-level webcam helper.
-        entry = mgr._entries[cam_id]            # type: ignore[attr-defined]
-        async with entry.lock:
-            if entry.driver is None:
-                raise HTTPException(status_code=409, detail="driver not open")
-            try:
-                rtsp_url = await entry.driver.start_webcam_rtsp(resolution="720", fov="WIDE")
-            except Exception as exc:
-                raise HTTPException(status_code=500, detail=f"webcam_start failed: {exc}")
+        except RuntimeError as exc:
+            # Manager surfaces wrong-mode / not-connected as RuntimeError; map
+            # to 409 so the client can distinguish from a 5xx camera error.
+            raise HTTPException(status_code=409, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"webcam_start failed: {exc}")
 
         # Kill any prior ffmpeg for this camera before starting a new one.
         procs = _preview_procs(request)
@@ -394,14 +441,37 @@ def build_router() -> APIRouter:
         procs[cam_id] = proc
 
         BOUNDARY = b"--frame"
+        # If ffmpeg produces no bytes for this many seconds, treat the stream
+        # as stalled and tear it down. The camera is bursty (RTSP keyframes,
+        # network jitter) but a healthy stream produces something every couple
+        # of seconds; 8 s is well above noise but well below "user gave up".
+        FFMPEG_STDOUT_IDLE_TIMEOUT = 8.0
+
         async def gen():
             try:
                 buf = b""
                 while True:
-                    chunk = await proc.stdout.read(65536)
+                    try:
+                        chunk = await asyncio.wait_for(
+                            proc.stdout.read(65536),
+                            timeout=FFMPEG_STDOUT_IDLE_TIMEOUT,
+                        )
+                    except TimeoutError:
+                        log.warning(
+                            "preview ffmpeg for %s produced no bytes in %.1fs — closing stream",
+                            cam_id, FFMPEG_STDOUT_IDLE_TIMEOUT,
+                        )
+                        break
                     if not chunk:
                         break
                     buf += chunk
+                    # Cap the parser buffer: if SOI/EOI markers never align
+                    # (corrupt JPEG, ffmpeg error stream), drop everything to
+                    # avoid unbounded memory growth.
+                    if len(buf) > 4 * 1024 * 1024:
+                        log.warning("preview ffmpeg for %s emitted 4 MiB without a complete frame — resetting buffer", cam_id)
+                        buf = b""
+                        continue
                     # Split on JPEG SOI/EOI markers, emit one part per frame.
                     while True:
                         soi = buf.find(b"\xff\xd8")
@@ -419,7 +489,10 @@ def build_router() -> APIRouter:
                 if proc.returncode is None:
                     try: proc.kill()
                     except Exception: pass
-                procs.pop(cam_id, None)
+                # Clear our entry only if we still own this slot; another
+                # request for the same cam_id may have replaced it.
+                if procs.get(cam_id) is proc:
+                    procs.pop(cam_id, None)
 
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
@@ -431,16 +504,29 @@ def build_router() -> APIRouter:
         if proc is not None and proc.returncode is None:
             try: proc.kill()
             except Exception: pass
-        try:
-            mgr = _mgr(request)
-            entry = mgr._entries.get(cam_id)    # type: ignore[attr-defined]
-            if entry and entry.driver is not None:
-                async with entry.lock:
-                    try: await entry.driver.stop_webcam()
-                    except Exception: pass
-        except Exception:
-            pass
+        await _mgr(request).stop_preview(cam_id)
         return CommandResult.success({"id": cam_id, "stopped": True})
+
+    # ── ATEM status + auto-trigger toggle ─────────────────────────────────
+
+    @router.get("/atem/status")
+    async def atem_status(request: Request):
+        """Return the current ATEM connection and recording state."""
+        watcher = getattr(request.app.state, "atem_watcher", None)
+        if watcher is None:
+            return CommandResult.success({"enabled": False})
+        return CommandResult.success({"enabled": True, **watcher.status})
+
+    @router.post("/atem/auto")
+    async def atem_set_auto(request: Request):
+        """Enable or disable ATEM auto-trigger. Body: {"enabled": true|false}"""
+        watcher = getattr(request.app.state, "atem_watcher", None)
+        if watcher is None:
+            raise HTTPException(status_code=404, detail="ATEM watcher not running")
+        body = await request.json()
+        enabled = bool(body.get("enabled", True))
+        watcher.set_auto(enabled)
+        return CommandResult.success({"enabled": True, **watcher.status})
 
     return router
 

@@ -49,10 +49,18 @@ if lsof -ti :8000 &>/dev/null; then
 fi
 
 # ── Start server ─────────────────────────────────────────────────────────────
+chflags nohidden "$SCRIPT_DIR"/.venv/lib/python*/site-packages/*.pth \
+  "$SCRIPT_DIR"/.venv/lib/python*/site-packages/__editable__*.pth 2>/dev/null || true
 source "$SCRIPT_DIR/.venv/bin/activate"
 
-echo "  Starting server…  (logs → .gopro_server.log)"
-python -m gopro_mgmt > "$LOG_FILE" 2>&1 &
+BOOTSTRAP_LOG="$SCRIPT_DIR/.gopro_bootstrap.log"
+echo "  Starting server…  (logs → .gopro_server.log, rotated at 5 MiB × 5)"
+# --log-file routes Python logging through RotatingFileHandler. The shell
+# redirect goes to a SEPARATE file because once Python rotates $LOG_FILE
+# the shell-level append keeps writing to the orphaned old inode forever.
+# Bootstrap output (early uvicorn pre-logging-setup writes, tracebacks
+# from import-time crashes) lands in BOOTSTRAP_LOG instead.
+python -m gopro_mgmt --log-file "$LOG_FILE" > "$BOOTSTRAP_LOG" 2>&1 &
 SERVER_PID=$!
 echo "$SERVER_PID" > "$PID_FILE"
 

@@ -24,6 +24,23 @@
       </span>
     </div>
     <div class="rail-right">
+      <span class="atem-group">
+        <span id="atem-indicator" class="atem-ind" data-state="searching" title="ATEM">
+          <span class="atem-dot"></span><span class="atem-lbl">ATEM</span>
+        </span>
+        <span id="atem-conn" class="atem-conn">SEARCH</span>
+        <button id="atem-auto-btn" class="atem-auto-btn" data-on="true" title="Toggle ATEM auto-trigger">AUTO</button>
+        <details id="atem-monitor" class="atem-monitor">
+          <summary>LOG</summary>
+          <div class="atem-monitor-panel">
+            <div class="atem-monitor-head">
+              <span id="atem-host">—</span>
+              <span id="atem-last">—</span>
+            </div>
+            <ol id="atem-events" class="atem-events"></ol>
+          </div>
+        </details>
+      </span>
       <span id="ws-indicator" class="ws-state" data-state="connecting" title="Server connection">
         <span class="ws-dot"></span><span class="ws-label">linking…</span>
       </span>
@@ -94,6 +111,13 @@
           <span class="readout-label">DISK</span>
           <span class="bar disk-bar"><i style="width:0%"></i></span>
           <span class="readout-value cam-sd">—</span>
+        </div>
+        <div class="readout cam-sig-row">
+          <span class="readout-label">SIG</span>
+          <span class="scan-rssi-bar cam-rssi-bar" aria-label="BLE signal">
+            <i></i><i></i><i></i><i></i>
+          </span>
+          <span class="readout-value cam-rssi">—</span>
         </div>
         <div class="readout cam-res-row hidden">
           <span class="readout-label">RES</span>
